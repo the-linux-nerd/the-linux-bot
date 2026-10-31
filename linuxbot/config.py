@@ -161,7 +161,11 @@ class NickServConfig:
     password: str = ""
     service: str = "NickServ"
     command: str = "IDENTIFY {password}"
-    wait: float = 3.0  # secondi di attesa prima di entrare nei canali
+    wait: float = 15.0  # attesa massima della conferma prima di entrare comunque nei canali
+    wait_for_login: bool = True  # entra nei canali solo dopo la conferma di NickServ
+    success_pattern: str = (r"(?i)(you are now (identified|logged in)|password accepted|now recognized|"
+                            r"sei (ora )?(stato )?identificat|password accettata|riconosciuto)")
+    failure_pattern: str = r"(?i)(invalid password|incorrect password|password (errata|non valida)|not registered)"
 
 
 @dataclass
@@ -177,6 +181,31 @@ class AuthConfig:
     nickserv: NickServConfig = field(default_factory=NickServConfig)
     oper: OperConfig = field(default_factory=OperConfig)
     user_modes: str = ""
+
+
+@dataclass
+class SelfOpConfig:
+    enabled: bool = False
+    method: str = "chanserv"         # chanserv | samode | auto (samode se IRC operator, altrimenti chanserv)
+    service: str = "ChanServ"
+    command: str = "OP {channel} {botnick}"
+    samode: str = "SAMODE {channel} +o {botnick}"
+    delay: float = 2.0               # attesa dopo l'ingresso (ChanServ spesso dà l'op da solo)
+    retry: float = 30.0              # secondi fra un tentativo e l'altro
+    max_retries: int = 3
+    on_deop: bool = True             # se gli tolgono l'op, lo richiede
+    channels: list[str] = field(default_factory=list)  # vuoto = tutti
+
+
+def _parse_self_op(data: dict) -> SelfOpConfig:
+    so = _section(data, "self_op", "")
+    _check_keys(so, set(SelfOpConfig.__dataclass_fields__), "self_op")
+    cfg = SelfOpConfig(**so)
+    cfg.method = str(cfg.method).lower()
+    if cfg.method not in ("chanserv", "samode", "auto"):
+        raise ConfigError("self_op.method: deve essere 'chanserv', 'samode' o 'auto'")
+    cfg.channels = [str(c) for c in _as_list(cfg.channels)]
+    return cfg
 
 
 @dataclass
@@ -295,6 +324,7 @@ class Config:
     logging: dict[str, Any] = field(default_factory=dict)
     memory: MemoryConfig = field(default_factory=lambda: MemoryConfig())
     bans: BansConfig = field(default_factory=lambda: BansConfig())
+    self_op: SelfOpConfig = field(default_factory=SelfOpConfig)
     path: Path | None = None
 
     @property
@@ -471,7 +501,7 @@ def _parse_bans(data: dict) -> BansConfig:
     return cfg
 
 
-EVENTS = ("connect", "self_join", "join", "part", "quit", "kick", "self_kick", "nick", "topic", "invite")
+EVENTS = ("connect", "identified", "self_join", "self_op", "self_deop", "join", "part", "quit", "kick", "self_kick", "nick", "topic", "invite")
 
 
 # --------------------------------------------------------------------------- parsing
@@ -489,7 +519,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         raise ConfigError("il file di configurazione deve contenere una mappa YAML")
     data = _expand_env(data)
     _check_keys(data, {"server", "identity", "auth", "channels", "admins", "behavior", "variables",
-                       "greetings", "responses", "commands", "events", "logging", "memory", "bans"}, "<radice>")
+                       "greetings", "responses", "commands", "events", "logging", "memory", "bans", "self_op"}, "<radice>")
 
     # server
     srv = _section(data, "server", "")
@@ -524,7 +554,14 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
     sasl_d = _section(auth_d, "sasl", "auth.")
     _check_keys(sasl_d, {"enabled", "username", "password"}, "auth.sasl")
     ns_d = _section(auth_d, "nickserv", "auth.")
-    _check_keys(ns_d, {"enabled", "password", "service", "command", "wait"}, "auth.nickserv")
+    _check_keys(ns_d, {"enabled", "password", "service", "command", "wait", "wait_for_login",
+                       "success_pattern", "failure_pattern"}, "auth.nickserv")
+    ns_defaults = NickServConfig()
+    for key in ("success_pattern", "failure_pattern"):
+        try:
+            re.compile(str(ns_d.get(key, getattr(ns_defaults, key))))
+        except re.error as exc:
+            raise ConfigError(f"auth.nickserv.{key}: regex non valida: {exc}") from None
     op_d = _section(auth_d, "oper", "auth.")
     _check_keys(op_d, {"enabled", "name", "password"}, "auth.oper")
     auth = AuthConfig(
@@ -538,7 +575,10 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
             password=str(ns_d.get("password") or ""),
             service=str(ns_d.get("service", "NickServ")),
             command=str(ns_d.get("command", "IDENTIFY {password}")),
-            wait=float(ns_d.get("wait", 3.0)),
+            wait=float(ns_d.get("wait", ns_defaults.wait)),
+            wait_for_login=bool(ns_d.get("wait_for_login", True)),
+            success_pattern=str(ns_d.get("success_pattern", ns_defaults.success_pattern)),
+            failure_pattern=str(ns_d.get("failure_pattern", ns_defaults.failure_pattern)),
         ),
         oper=OperConfig(
             enabled=bool(op_d.get("enabled", False)),
@@ -699,7 +739,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         server=server, identity=identity, auth=auth, channels=channels,
         admins=[str(a) for a in _as_list(data.get("admins"))], behavior=behavior,
         variables=variables, greetings=greetings, responses=responses, commands=commands,
-        events=events, logging=_section(data, "logging", ""), memory=_parse_memory(data), bans=_parse_bans(data),
+        events=events, logging=_section(data, "logging", ""), memory=_parse_memory(data), bans=_parse_bans(data), self_op=_parse_self_op(data),
         path=path,
     )
 

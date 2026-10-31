@@ -47,16 +47,31 @@ Ci sono due significati di "operatore", e il bot li gestisce entrambi:
 1. **IRC operator del server** (`OPER`): nel server (es. `ircd.conf` di UnrealIRCd/InspIRCd)
    va definito un blocco oper per il bot; poi in `auth.oper` metti nome e password.
    Il bot invia `OPER nome password` appena registrato.
-2. **Operatore del canale** (`+o`): di solito lo dà ChanServ. Registra il nick del bot,
-   aggiungilo alla access list del canale con auto-op, abilita `auth.nickserv` (o `auth.sasl`)
-   e, se vuoi, chiedi l'op esplicitamente all'ingresso:
+2. **Operatore del canale** (`+o`): lo dà ChanServ appena il bot entra. Servono tre cose:
+   - **sui services**: registra il nick del bot e dagli l'auto-op nel canale
+     (Anope: `/msg ChanServ AOP #linux ADD TheLinuxBot`; Atheme:
+     `/msg ChanServ FLAGS #linux TheLinuxBot +Oo`);
+   - **identificazione prima dell'ingresso**: con `auth.sasl` il bot è identificato già alla
+     connessione; con `auth.nickserv` (e `wait_for_login: true`, il default) il bot aspetta la
+     conferma di NickServ, o il numerico 900, prima di entrare nei canali, fino a `wait` secondi.
+     Così ChanServ lo riconosce e gli dà l'op subito;
+   - **`self_op`** come rete di sicurezza: dopo l'ingresso il bot controlla di essere op; se non
+     lo è manda `OP #canale TheLinuxBot` a ChanServ (o `SAMODE` se è IRC operator e
+     `method: auto`/`samode`), riprova ogni `retry` secondi fino a `max_retries` volte e lo
+     richiede se qualcuno gli toglie l'op. Se non ci riesce lo scrive nel log, indicando di
+     controllare la access list.
 
    ```yaml
+   auth:
+     sasl: { enabled: true, username: TheLinuxBot, password: ${LINUXBOT_SASL_PASSWORD} }
+   self_op:
+     enabled: true
+     method: auto
+     retry: 30
+     max_retries: 3
    events:
-     self_join:
-       - say: { to: ChanServ, text: "OP {channel} {botnick}" }
-       # oppure, da IRC operator:
-       # - raw: "SAMODE {channel} +o {botnick}"
+     self_deop:
+       - say: { to: "#linux-staff", text: "{nick} mi ha tolto l'op in {channel}" }
    ```
 
 ## Il saluto e la "@"
@@ -165,6 +180,7 @@ un esempio di tutto. In sintesi:
 | `server`     | host, porta, TLS, password, encoding |
 | `identity`   | nick, nick alternativi, username, realname, risposta CTCP VERSION |
 | `auth`       | `sasl`, `nickserv`, `oper`, `user_modes` |
+| `self_op`    | come il bot ottiene e mantiene l'op nei canali |
 | `channels`   | canali (nome o `{name, key, owners}`) |
 | `admins`     | maschere `nick!user@host` degli amministratori del bot |
 | `behavior`   | prefissi dei comandi, utenti ignorati, anti-flood, riconnessione, messaggi di sistema |
@@ -254,8 +270,8 @@ una mappa. Il canale di default è quello in cui è arrivato il comando.
 
 ### Eventi
 
-`connect`, `self_join`, `self_kick`, `join`, `part`, `quit`, `nick`, `kick`, `topic`,
-`invite`. Variabili extra: `{reason}`, `{victim}`, `{kicker}`, `{old_nick}`, `{new_nick}`, `{topic}`.
+`connect`, `identified`, `self_join`, `self_op`, `self_deop`, `self_kick`, `join`, `part`,
+`quit`, `nick`, `kick`, `topic`, `invite`. Variabili extra: `{reason}`, `{victim}`, `{kicker}`, `{old_nick}`, `{new_nick}`, `{topic}`.
 
 ## Esecuzione come servizio
 

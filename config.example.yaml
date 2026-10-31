@@ -53,7 +53,14 @@ auth:
     service: NickServ
     command: "IDENTIFY {password}"   # alcuni services vogliono "IDENTIFY {botnick} {password}"
     password: ${LINUXBOT_NICKSERV_PASSWORD:-cambiami}
-    wait: 3                          # secondi da attendere prima di entrare nei canali
+    # Il bot entra nei canali solo dopo la conferma di NickServ, così ChanServ lo
+    # riconosce subito e gli dà l'op. "wait" è l'attesa massima: poi entra comunque.
+    wait_for_login: true
+    wait: 15
+    # Frasi (regex) con cui i services confermano o rifiutano l'identificazione.
+    # I valori predefiniti coprono Anope e Atheme in inglese e italiano.
+    # success_pattern: "(?i)you are now identified|password accepted"
+    # failure_pattern: "(?i)invalid password"
 
   # IRC operator (comando OPER): richiede un blocco oper nel server (ircd.conf).
   oper:
@@ -104,6 +111,25 @@ variables:
   site: "https://the-linux-nerd.example.org"
   rules_url: "https://the-linux-nerd.example.org/regole"
   pastebin: "https://paste.debian.net"
+
+# -----------------------------------------------------------------------------
+# Op per il bot: appena entra in un canale controlla di essere op e, se no, lo
+# chiede a ChanServ; riprova se non arriva e lo richiede se glielo tolgono.
+# Sui services il bot deve avere l'auto-op nel canale, ad esempio:
+#   Anope:   /msg ChanServ AOP #linux ADD TheLinuxBot
+#   Atheme:  /msg ChanServ FLAGS #linux TheLinuxBot +Oo
+# -----------------------------------------------------------------------------
+self_op:
+  enabled: true
+  method: auto             # chanserv | samode | auto (SAMODE se il bot è IRC operator)
+  service: ChanServ
+  command: "OP {channel} {botnick}"
+  samode: "SAMODE {channel} +o {botnick}"
+  delay: 2                 # secondi dopo l'ingresso: spesso ChanServ dà l'op da solo
+  retry: 30                # attesa fra un tentativo e l'altro
+  max_retries: 3
+  on_deop: true            # se gli tolgono l'op, lo richiede
+  channels: []             # vuoto = tutti i canali
 
 # -----------------------------------------------------------------------------
 # Ban: registro persistente (stesso database della memoria), ban a tempo,
@@ -503,17 +529,17 @@ commands:
 # -----------------------------------------------------------------------------
 # Azioni legate agli eventi IRC.
 #   connect    dopo la registrazione al server
+#   identified quando i services confermano l'identificazione
 #   self_join  quando il bot entra in un canale
+#   self_op / self_deop  quando il bot riceve / perde l'op ({nick} = chi l'ha fatto)
 #   join/part/quit/nick/kick/topic/invite  quando lo fanno gli altri
 #   self_kick  quando il bot viene espulso
 # Variabili extra: {reason}, {victim}, {kicker}, {old_nick}, {new_nick}, {topic}
 # -----------------------------------------------------------------------------
 events:
-  self_join:
-    # Chiede l'op a ChanServ in ogni canale in cui entra.
-    - say: { to: ChanServ, text: "OP {channel} {botnick}" }
-    # Da IRC operator, su UnrealIRCd/InspIRCd si può anche forzare:
-    # - raw: "SAMODE {channel} +o {botnick}"
+  # Avvisa lo staff se qualcuno toglie l'op al bot (che lo richiede da solo).
+  self_deop:
+    - say: { to: "#linux-staff", text: "{nick} mi ha tolto l'op in {channel}, lo richiedo a ChanServ." }
 
   invite:
     # Decommenta per accettare gli inviti in altri canali.

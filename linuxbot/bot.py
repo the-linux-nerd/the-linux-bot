@@ -43,6 +43,8 @@ class Bot(BanMixin):
         self.wallclock = wallclock
         self.memory: Memory | None = None
         self._banlist_buffer: dict = {}
+        self._op_tasks: dict[str, asyncio.Task] = {}
+        self._identified: asyncio.Event | None = None
         self._ban_resync: dict = {}
         self._open_memory()
         self.nick = config.identity.nick
@@ -176,6 +178,8 @@ class Bot(BanMixin):
         self.is_oper = False
         self._nick_attempt = 0
         self._sasl_in_progress = False
+        self._identified = None
+        self._op_tasks.clear()
 
     # ------------------------------------------------------------------ registrazione e auth
 
@@ -246,13 +250,22 @@ class Bot(BanMixin):
                                                  "botnick": self.nick})
             self.send(build_line("PRIVMSG", auth.nickserv.service, cmd), priority=True)
             wait = auth.nickserv.wait
+            # wait <= 0: non aspettare la conferma
+            self._identified = asyncio.Event() if auth.nickserv.wait_for_login and wait > 0 else None
         self.run_event("connect", self._base_context())
         self._spawn(self._join_channels(wait))
         if self.config.bans.enabled:
             self._spawn(self._ban_expiry_loop())
 
     async def _join_channels(self, wait: float = 0.0) -> None:
-        if wait:
+        if self._identified is not None:
+            # Entra solo dopo la conferma di NickServ: così ChanServ riconosce il bot e gli dà l'op.
+            try:
+                await asyncio.wait_for(self._identified.wait(), timeout=wait)
+            except asyncio.TimeoutError:
+                log.warning("Nessuna conferma da %s dopo %.0f secondi: entro comunque nei canali",
+                            self.config.auth.nickserv.service, wait)
+        elif wait:
             await asyncio.sleep(wait)
         for ch in self.config.channels:
             if irc_lower(ch.name) not in self.channels:
@@ -302,6 +315,8 @@ class Bot(BanMixin):
         elif code in ("464", "491"):
             log.error("OPER fallito: %s", msg.last)
         elif code in ("900", "903"):
+            if code == "900":  # RPL_LOGGEDIN: identificato (SASL o NickServ)
+                self._set_identified()
             if code == "903":
                 log.info("Autenticazione SASL riuscita")
                 self._end_cap()
@@ -350,6 +365,7 @@ class Bot(BanMixin):
             log.info("Entrato in %s", channel)
             self._ban_sync_start(channel)
             self.run_event("self_join", ctx)
+            self._request_op(channel)
             return
         chan = self.channels.get(key)
         if chan is not None:
@@ -453,6 +469,8 @@ class Bot(BanMixin):
             if ch in self.prefix_modes and arg is not None:
                 modes = chan.users.setdefault(irc_lower(arg), set())
                 (modes.add if adding else modes.discard)(ch)
+                if self._is_me(arg) and ch == "o":
+                    self._on_self_op_change(chan.name, adding, msg.nick)
                 if adding and self._is_me(arg) and self._is_op_in(chan.name):
                     self._ban_resync_apply(chan.name)
             elif ch == "b" and arg is not None:
@@ -461,8 +479,28 @@ class Bot(BanMixin):
     # ------------------------------------------------------------------ messaggi
 
     def _on_notice(self, msg: Message) -> None:
-        if msg.nick and irc_lower(msg.nick) == irc_lower(self.config.auth.nickserv.service):
-            log.info("%s: %s", msg.nick, strip_formatting(msg.last))
+        if not msg.nick:
+            return
+        text = strip_formatting(msg.last)
+        ns = self.config.auth.nickserv
+        if irc_lower(msg.nick) == irc_lower(ns.service):
+            log.info("%s: %s", msg.nick, text)
+            if re.search(ns.success_pattern, text):
+                self._set_identified()
+            elif re.search(ns.failure_pattern, text):
+                log.error("Identificazione con %s fallita: %s", ns.service, text)
+                if self._identified is not None:
+                    self._identified.set()  # entra comunque, ma senza op automatico
+        elif irc_lower(msg.nick) == irc_lower(self.config.self_op.service):
+            log.info("%s: %s", msg.nick, text)
+
+    def _set_identified(self) -> None:
+        first = self._identified is None or not self._identified.is_set()
+        if self._identified is not None:
+            self._identified.set()
+        if first:
+            log.info("Identificato con i services")
+            self.run_event("identified", self._base_context())
 
     def _on_privmsg(self, msg: Message) -> None:
         if len(msg.params) < 2 or not msg.prefix or self._is_me(msg.nick):
@@ -922,6 +960,58 @@ class Bot(BanMixin):
         self._quitting = True
         reason = self._r(value, ctx) or "Arrivederci!"
         self.send(build_line("QUIT", reason))
+
+    # ------------------------------------------------------------------ op per il bot
+
+    def has_op(self, channel: str) -> bool:
+        """True se il bot ha +o (o un modo superiore, es. +a/+q) nel canale."""
+        return self._rank(self.user_modes(channel, self.nick)) <= self.prefix_modes.index("o")
+
+    def _request_op(self, channel: str) -> None:
+        cfg = self.config.self_op
+        if not cfg.enabled or (cfg.channels and not self._channel_in(channel, cfg.channels)):
+            return
+        key = irc_lower(channel)
+        task = self._op_tasks.get(key)
+        if task is not None and not task.done():
+            return
+        self._op_tasks[key] = self._spawn(self._ensure_op(channel))
+
+    def _send_op_request(self, channel: str) -> None:
+        cfg = self.config.self_op
+        ctx = {"channel": channel, "botnick": self.nick, "nick": self.nick}
+        if cfg.method == "samode" or (cfg.method == "auto" and self.is_oper):
+            self.send(sanitize(render(cfg.samode, ctx)))
+        else:
+            self.send(build_line("PRIVMSG", cfg.service, render(cfg.command, ctx)))
+
+    async def _ensure_op(self, channel: str) -> None:
+        cfg = self.config.self_op
+        if cfg.delay:
+            await asyncio.sleep(cfg.delay)
+        for attempt in range(cfg.max_retries + 1):
+            if irc_lower(channel) not in self.channels:
+                return  # uscito dal canale
+            if self.has_op(channel):
+                return
+            log.info("Chiedo l'op in %s (tentativo %d di %d)", channel, attempt + 1, cfg.max_retries + 1)
+            self._send_op_request(channel)
+            await asyncio.sleep(cfg.retry)
+        if irc_lower(channel) in self.channels and not self.has_op(channel):
+            log.error("Non ho ottenuto l'op in %s: controlla che il bot sia nella access list di %s "
+                      "e che sia identificato", channel, cfg.service)
+
+    def _on_self_op_change(self, channel: str, adding: bool, by: str) -> None:
+        ctx = self._base_context(None, channel)
+        ctx["nick"] = by
+        if adding:
+            log.info("Ho ricevuto l'op in %s da %s", channel, by)
+            self.run_event("self_op", ctx)
+        else:
+            log.warning("%s mi ha tolto l'op in %s", by, channel)
+            self.run_event("self_deop", ctx)
+            if self.config.self_op.on_deop:
+                self._request_op(channel)
 
     # ------------------------------------------------------------------ memoria: seen e messaggi
 
