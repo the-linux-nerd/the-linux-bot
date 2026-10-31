@@ -66,9 +66,10 @@ def _clean(text: str) -> str:
 
 
 class Searcher:
-    def __init__(self, cfg: SearchConfig, fetch: Callable[[str, float], Any] = http_get,
-                 clock: Callable[[], float] = time.monotonic):
+    def __init__(self, cfg: SearchConfig, fetch: Callable[..., Any] = http_get,
+                 clock: Callable[[], float] = time.monotonic, state: Callable[[], Any] | None = None):
         self.cfg = cfg
+        self.state = state  # restituisce il database (con state_get/state_set) o None
         self.fetch = fetch
         self.clock = clock
         self.cache: dict[tuple, tuple[float, list[Result]]] = {}
@@ -237,7 +238,20 @@ class Searcher:
                 log.warning("Ricerca su %s fallita: %s", p.label, exc)
                 return exc
 
+        # Gli ID dei canali YouTube già risolti stanno nel database: si leggono e si salvano qui,
+        # nel thread principale (SQLite non si può usare dai thread delle richieste di rete).
+        db = self.state() if self.state else None
+        handles = [c for p in chosen if p.type == "youtube" and p.api_key for c in p.channels if c.startswith("@")]
+        if db is not None:
+            for handle in handles:
+                saved = db.state_get(f"youtube:{handle.lower()}")
+                if saved and handle not in self.yt_channel_ids:
+                    self.yt_channel_ids[handle] = saved
+        known = set(self.yt_channel_ids)
         outcomes = await asyncio.gather(*(run(p) for p in chosen))
+        if db is not None:
+            for handle in set(self.yt_channel_ids) - known:
+                db.state_set(f"youtube:{handle.lower()}", self.yt_channel_ids[handle])  # non si rifà ai riavvii
         per_provider = [o for o in outcomes if isinstance(o, list)]
         failed = [p.label for p, o in zip(chosen, outcomes) if not isinstance(o, list)]
         # un risultato per provider a turno, così si vedono fonti diverse

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import functools
+import json
+import os
 import re
 import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from .irc import irc_lower
 
@@ -75,7 +78,16 @@ CREATE TABLE IF NOT EXISTS karma_log (
     ts           REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS karma_log_giver ON karma_log (giver_key, ts);
+CREATE TABLE IF NOT EXISTS state (
+    key     TEXT PRIMARY KEY,       -- es. "schedule:karma-mezzanotte", "youtube:@the-linux-nerd"
+    value   TEXT NOT NULL,          -- JSON
+    updated REAL NOT NULL
+);
 """
+
+
+class DatabaseLocked(RuntimeError):
+    """Un'altra istanza del bot sta già usando questo database."""
 
 
 @dataclass
@@ -149,20 +161,95 @@ def _timed(method):
 
 
 class Memory:
-    def __init__(self, path: str | Path, clock=time.time):
-        self.path = str(path)
+    def __init__(self, path: str | Path, clock=time.time, lock: bool = False):
+        self.path = str(path) if str(path) == ":memory:" else str(Path(path).expanduser().resolve())
         self.clock = clock
         self.on_timing = None
+        self._lock_fh = None
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            if lock:
+                self._acquire_lock()
         self.db = sqlite3.connect(self.path)
         if self.path != ":memory:":
             self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA synchronous=FULL")  # ogni scrittura è su disco anche se il PC si spegne di colpo
         self.db.executescript(SCHEMA)
         self.db.commit()
 
+    def _acquire_lock(self) -> None:
+        """Impedisce che due copie del bot usino lo stesso database (Linux e macOS)."""
+        try:
+            import fcntl
+        except ImportError:  # Windows: nessun blocco
+            return
+        fh = open(self.path + ".lock", "a+")
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.seek(0)
+            other = fh.read().strip() or "?"
+            fh.close()
+            raise DatabaseLocked(f"il database {self.path} è già in uso da un'altra copia del bot (PID {other})") from None
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(os.getpid()))
+        fh.flush()
+        self._lock_fh = fh
+
     def close(self) -> None:
         self.db.close()
+        if self._lock_fh is not None:
+            self._lock_fh.close()
+            self._lock_fh = None
+
+    # ------------------------------------------------------------------ stato generico
+
+    @_timed
+    def state_get(self, key: str, default: Any = None) -> Any:
+        row = self.db.execute("SELECT value FROM state WHERE key = ?", (key,)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    @_timed
+    def state_set(self, key: str, value: Any) -> None:
+        self.db.execute("INSERT INTO state (key, value, updated) VALUES (?, ?, ?) "
+                        "ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated = excluded.updated",
+                        (key, json.dumps(value), self.clock()))
+        self.db.commit()
+
+    @_timed
+    def summary(self) -> dict[str, int]:
+        """Quanti dati ci sono: utile nel log all'avvio per vedere che la memoria è stata ritrovata."""
+        q = lambda sql: int(self.db.execute(sql).fetchone()[0])  # noqa: E731
+        return {
+            "utenti visti": q("SELECT COUNT(DISTINCT nick_key) FROM seen"),
+            "messaggi in attesa": q("SELECT COUNT(*) FROM memos WHERE delivered_ts IS NULL"),
+            "ban attivi": q("SELECT COUNT(*) FROM bans WHERE removed_ts IS NULL"),
+            "utenti con karma": q("SELECT COUNT(*) FROM karma WHERE score != 0"),
+        }
+
+    @_timed
+    def backup(self, directory: str | Path, keep: int = 7) -> Path:
+        """Copia coerente del database (anche mentre il bot scrive) in ``directory``; tiene le ultime ``keep``."""
+        folder = Path(directory).expanduser()
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = Path(self.path).stem if self.path != ":memory:" else "memoria"
+        stamp = time.strftime("%Y-%m-%d_%H%M%S", time.localtime(self.clock()))
+        target = folder / f"{stem}-{stamp}.db"
+        n = 1
+        while target.exists():  # due copie nello stesso secondo: non sovrascrivere
+            target = folder / f"{stem}-{stamp}-{n}.db"
+            n += 1
+        dest = sqlite3.connect(str(target))
+        try:
+            self.db.backup(dest)
+        finally:
+            dest.close()
+        if keep > 0:
+            old = sorted(folder.glob(f"{stem}-*.db"))[:-keep]
+            for path in old:
+                path.unlink(missing_ok=True)
+        return target
 
     # ------------------------------------------------------------------ seen
 

@@ -130,6 +130,37 @@ per ognuna, i comandi che l'utente può usare.
   quelle lunghe vanno in privato (`method: private`), in notice o nel canale (`say`), con un
   breve avviso nel canale. Tutti i testi fissi si cambiano in `about.texts`.
 
+## Memoria fra un riavvio e l'altro
+
+Il bot può essere riavviato o spento quando vuoi (anche di colpo): tutto ciò che deve ricordare
+sta in un database SQLite su disco, `memory.database` (default `linuxbot.db` nella cartella del
+file di configurazione, qualunque sia la cartella da cui lo avvii).
+
+| Cosa | Dopo un riavvio |
+|---|---|
+| karma, classifica, cooldown e limite giornaliero del karma | resta |
+| ban, con chi li ha messi, motivi e scadenze dei ban a tempo | resta (i ban scaduti mentre era spento vengono tolti appena riparte) |
+| chi è passato (seen), messaggi lasciati e non ancora consegnati | resta |
+| ultima esecuzione delle attività programmate | resta: non vengono ripetute, e quelle saltate si recuperano (`catch_up`) |
+| ID dei canali YouTube già risolti | resta (niente quota sprecata) |
+| attese fra un uso e l'altro dei comandi, cache delle ricerche, `!stats` | si azzerano |
+
+- **Spegnimenti improvvisi**: ogni modifica viene scritta subito su disco (SQLite in modalità
+  WAL con `synchronous=FULL`), quindi anche un `kill -9` o un PC che si spegne non fanno
+  perdere i dati già confermati.
+- **Una sola copia**: su Linux e macOS il bot blocca il database (`<database>.lock`); una
+  seconda copia avviata per sbaglio si ferma con un errore invece di scrivere sugli stessi dati.
+  Il blocco si libera da solo quando il bot termina, in qualunque modo.
+- **Attività saltate**: se il PC era spento all'orario di un'attività, `catch_up` dice per quanto
+  tempo recuperarla appena il bot riparte (default 10 minuti). Nella config d'esempio la top ten
+  di mezzanotte ha `catch_up: 12h`: riacceso alle 8, il bot la pubblica con "(prevista alle 00:00)".
+- **Backup**: l'azione `db_backup` fa una copia coerente del database (anche mentre il bot
+  scrive) in una cartella, tenendo le ultime `keep`. Nella config d'esempio c'è un backup ogni
+  notte alle 4 (recuperato entro un giorno se il PC era spento) e il comando `!backup` per gli
+  admin. Per ripristinare: ferma il bot e copia il backup al posto del database.
+- All'avvio il log dice cosa ha ritrovato, ad esempio
+  `Database /home/fabio/bot/linuxbot.db: utenti visti: 152, messaggi in attesa: 2, ban attivi: 3, utenti con karma: 40`.
+
 ## Il saluto e la "@"
 
 Il saluto scrive il nick così com'è (`Ciao mario, benvenuto…`): i client IRC lo evidenziano
@@ -491,13 +522,15 @@ schedules:
       - say: ["💡 Ctrl+R cerca nella cronologia", "💡 'cd -' torna alla cartella precedente"]
 ```
 
-- Qualsiasi azione va bene: `say`, `karma_top`, `topic`, `mode`, `raw`...; nei testi `{channel}`
-  è il canale in cui l'attività sta girando e `{schedule}` il suo nome.
+- Qualsiasi azione va bene: `say`, `karma_top`, `topic`, `mode`, `raw`, `db_backup`...; nei
+  testi `{channel}` è il canale in cui l'attività sta girando, `{schedule}` il suo nome e
+  `{late}` dice se è in ritardo. Con `per_channel: false` le azioni girano una volta sola, senza
+  canale (es. un backup).
 - `!esegui <nome>` (admin) la esegue subito, per provarla senza aspettare l'orario.
-- Il bot controlla le attività ogni minuto. Se resta bloccato per qualche minuto (fino a 10),
-  esegue quelle che ha saltato; se è disconnesso all'orario previsto, quell'esecuzione si perde.
-  L'ultima esecuzione è ricordata in memoria: un riavvio proprio nel minuto dell'attività
-  potrebbe ripeterla.
+- Il bot controlla le attività ogni minuto. L'ultima esecuzione è salvata nel database, quindi
+  un riavvio non le ripete. Se all'orario previsto il bot era spento o non ancora nel canale,
+  l'attività viene eseguita appena possibile, purché non sia passato più di `catch_up`
+  (default `10m`; es. `catch_up: 12h`); oltre, viene saltata con un avviso nel log.
 
 ## Log, debug e statistiche
 

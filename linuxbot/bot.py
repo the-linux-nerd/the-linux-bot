@@ -7,6 +7,7 @@ import base64
 import logging
 import random
 import re
+import sqlite3
 import ssl
 import time
 from dataclasses import dataclass, field
@@ -59,12 +60,11 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
         self.reload_hooks: list[Callable[[Config], None]] = []  # es. riconfigurazione dei log
         self.chatlog: ChatLog | None = None
         self._open_chatlog()
-        self.searcher: Searcher | None = Searcher(config.search) if config.search.enabled else None
+        self.searcher: Searcher | None = (Searcher(config.search, state=lambda: self.memory)
+                                          if config.search.enabled else None)
         self.memory: Memory | None = None
         self._banlist_buffer: dict = {}
-        self._schedule_last: dict[str, str] = {}
-        self._schedule_every_last: dict[str, float] = {}
-        self._schedule_checked = None
+        self._schedule_last: dict[str, dict] = {}
         self._op_tasks: dict[str, asyncio.Task] = {}
         self._identified: asyncio.Event | None = None
         self._ban_resync: dict = {}
@@ -1052,6 +1052,23 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
         elif not text.startswith("\x01"):
             self._chat("", f"<{self.nick}> -> {target}: {text}")
 
+    def _action_db_backup(self, value: Any, ctx: dict) -> None:
+        """Copia del database in una cartella (relativa alla configurazione), tenendo le ultime N."""
+        opts = value if isinstance(value, dict) else {"directory": value or "backups"}
+        if self.memory is None or self.memory.path == ":memory:":
+            log_mem.warning("db_backup: nessun database su disco da copiare")
+            return
+        folder = self.config.resolve(str(opts.get("directory", "backups")))
+        try:
+            keep = int(opts.get("keep", 7))
+            target = self.memory.backup(folder, keep)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            log_mem.error("Backup del database fallito: %s", exc)
+            return
+        log_mem.info("Backup del database in %s", target)
+        if ctx.get("nick") and not self._is_me(ctx.get("nick", "")):
+            self.notice(ctx["nick"], f"Backup del database fatto: {target.name}")
+
     def _db_timing(self, operation: str, seconds: float) -> None:
         threshold = self.config.logging.slow_db_threshold
         slow = threshold > 0 and seconds > threshold
@@ -1177,18 +1194,24 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
 
     def _open_memory(self) -> None:
         cfg = self.config
-        path = str(cfg.database_path) if (cfg.memory.enabled or cfg.bans.enabled or cfg.karma.enabled) else None
+        path = None
+        if cfg.memory.enabled or cfg.bans.enabled or cfg.karma.enabled or cfg.schedules:
+            db = cfg.database_path
+            path = str(db) if str(db) == ":memory:" else str(db.expanduser().resolve())
         if self.memory is not None and self.memory.path == path:
             return
         if self.memory is not None:
             self.memory.close()
             self.memory = None
         if path is not None:
-            self.memory = Memory(path, clock=lambda: self.wallclock())
+            # lock: due copie del bot non devono usare lo stesso database (solleva DatabaseLocked)
+            self.memory = Memory(path, clock=lambda: self.wallclock(), lock=True)
             self.memory.on_timing = self._db_timing
             self.memory.prune(cfg.memory.retention_days)
             self._last_prune = self.wallclock()
-            log_mem.info("Memoria su %s", path)
+            if path != ":memory:":
+                found = ", ".join(f"{k}: {v}" for k, v in self.memory.summary().items())
+                log_mem.info("Database %s: %s", path, found)
 
     @property
     def seen_store(self) -> Memory | None:
@@ -1352,7 +1375,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
         self._open_memory()
         self._open_chatlog()
         fetch = self.searcher.fetch if self.searcher is not None else http_get
-        self.searcher = Searcher(new.search, fetch) if new.search.enabled else None
+        self.searcher = Searcher(new.search, fetch, state=lambda: self.memory) if new.search.enabled else None
         for hook in self.reload_hooks:
             hook(new)
         log_cfg.info("Configurazione ricaricata da %s", new.path)

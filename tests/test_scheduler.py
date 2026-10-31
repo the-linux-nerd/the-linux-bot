@@ -58,7 +58,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out, ["PRIVMSG #linux :Top ten in #linux: 1. mario (2), 2. luigi (1)"])
         self.assertEqual(await self.run_at(at(2026, 11, 3, 0, 0)), ([], []))  # una volta sola
         ran, _ = await self.run_at(at(2026, 11, 4, 0, 0))                    # e di nuovo il giorno dopo
-        self.assertEqual(ran, ["karma-mezzanotte"])
+        self.assertIn("karma-mezzanotte", ran)
 
     async def test_catch_up_skipped_minutes(self):
         await self.run_at(at(2026, 11, 2, 23, 57))
@@ -68,7 +68,7 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
     async def test_no_catch_up_after_long_pause(self):
         await self.run_at(at(2026, 11, 2, 20, 0))
         ran, _ = await self.run_at(at(2026, 11, 3, 0, 30))
-        self.assertEqual(ran, [])
+        self.assertNotIn("karma-mezzanotte", ran)
 
     async def test_skip_empty(self):
         bot = make_bot(SCHED)
@@ -80,22 +80,83 @@ class SchedulerTest(unittest.IsolatedAsyncioTestCase):
     async def test_days_and_multiple_times_in_all_channels(self):
         self.assertEqual((await self.run_at(at(2026, 11, 6, 21, 30)))[0], [])  # venerdì
         ran, out = await self.run_at(at(2026, 11, 7, 21, 30))                 # sabato
-        self.assertEqual(ran, ["weekend"])
-        self.assertEqual(sorted(out), ["PRIVMSG #altro :Buon weekend da Bot in #altro!",
-                                       "PRIVMSG #linux :Buon weekend da Bot in #linux!"])
-        self.assertEqual((await self.run_at(at(2026, 11, 8, 9, 0)))[0], ["weekend"])  # domenica
+        self.assertIn("weekend", ran)
+        self.assertIn("PRIVMSG #altro :Buon weekend da Bot in #altro!", out)
+        self.assertIn("PRIVMSG #linux :Buon weekend da Bot in #linux!", out)
+        self.assertIn("weekend", (await self.run_at(at(2026, 11, 8, 9, 0)))[0])  # domenica
 
     async def test_every_interval(self):
         self.assertEqual((await self.run_at(at(2026, 11, 3, 10, 0)))[0], [])
-        self.bot.clock.now += 7200
+        self.assertEqual((await self.run_at(at(2026, 11, 3, 11, 59)))[0], [])
         ran, out = await self.run_at(at(2026, 11, 3, 12, 0))
         self.assertEqual((ran, out), (["tip"], ["PRIVMSG #altro consiglio"]))
 
-    async def test_skips_channels_where_bot_is_not(self):
+    async def test_waits_for_channel_then_gives_up(self):
         self.bot.handle_line(":Bot!b@h PART #linux")
+        self.assertEqual(await self.run_at(at(2026, 11, 3, 0, 0)), ([], []))  # riproverà
+        self.bot.handle_line(":Bot!b@h JOIN #linux")                           # es. appena avviato
+        ran, out = await self.run_at(at(2026, 11, 3, 0, 1))
+        self.assertEqual(ran, ["karma-mezzanotte"])
+        self.assertEqual(out, ["PRIVMSG #linux :Top ten in #linux: 1. mario (2), 2. luigi (1)"])
+        self.bot.handle_line(":Bot!b@h PART #linux")
+        await self.run_at(at(2026, 11, 3, 23, 50))
         with self.assertLogs("linuxbot.events", "WARNING"):
-            ran, out = await self.run_at(at(2026, 11, 3, 0, 0))
-        self.assertEqual(out, [])
+            await self.run_at(at(2026, 11, 4, 0, 9))   # ultimo minuto utile: avvisa
+        with self.assertLogs("linuxbot.events", "WARNING") as logs:
+            await self.run_at(at(2026, 11, 4, 0, 11))  # finestra scaduta
+        self.assertIn("saltata", logs.output[-1])
+
+    async def test_survives_restart_and_catches_up(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = SCHED.replace('memory: {database: ":memory:"}', f"memory: {{database: '{os.path.join(tmp, 's.db')}'}}")
+            cfg = cfg.replace('    at: "00:00"\n', '    at: "00:00"\n    catch_up: 12h\n')
+            cfg = cfg.replace('text: "Top ten{where}: {list}"', 'text: "Top ten{where}{late}: {list}"')
+
+            def start():
+                bot = make_bot(cfg)
+                bot.handle_line(":Bot!b@h JOIN #linux")
+                bot.handle_line(":srv 353 Bot = #linux :@Bot anna mario")
+                return bot
+
+            bot = start()
+            for t in ("anna!a@h PRIVMSG #linux :mario++",):
+                bot.handle_line(":" + t)
+            self.assertEqual(bot.run_due_schedules(at(2026, 11, 3, 0, 0)), ["karma-mezzanotte"])
+            await bot.drain()
+            bot.memory.close()
+            bot = start()                                       # riavvio nello stesso minuto
+            self.assertEqual(bot.run_due_schedules(at(2026, 11, 3, 0, 0)), [])
+            bot.memory.close()
+            # il PC era spento a mezzanotte: riacceso alle 8:15 recupera la top ten
+            bot = start()
+            bot.take()
+            self.assertEqual(bot.run_due_schedules(at(2026, 11, 4, 8, 15)), ["karma-mezzanotte"])
+            await bot.drain()
+            self.assertEqual(bot.take(), ["PRIVMSG #linux :Top ten in #linux (prevista alle 00:00): 1. mario (1)"])
+            self.assertEqual(bot.run_due_schedules(at(2026, 11, 4, 8, 16)), [])
+            bot.memory.close()
+            # acceso troppo tardi (oltre catch_up): niente
+            bot = start()
+            with self.assertLogs("linuxbot.events", "WARNING"):
+                self.assertEqual(bot.run_due_schedules(at(2026, 11, 5, 13, 0)), [])
+            bot.memory.close()
+
+    async def test_every_survives_restart(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = SCHED.replace('memory: {database: ":memory:"}', f"memory: {{database: '{os.path.join(tmp, 'e.db')}'}}")
+            bot = make_bot(cfg)
+            bot.handle_line(":Bot!b@h JOIN #altro")
+            bot.run_due_schedules(at(2026, 11, 3, 10, 0))
+            bot.memory.close()
+            bot = make_bot(cfg)
+            bot.handle_line(":Bot!b@h JOIN #altro")
+            self.assertEqual(bot.run_due_schedules(at(2026, 11, 3, 11, 0)), [])
+            self.assertIn("tip", bot.run_due_schedules(at(2026, 11, 3, 12, 0)))
+            bot.memory.close()
 
     async def test_run_now_command(self):
         self.bot.handle_line(":boss!b@admin.host PRIVMSG Bot :!esegui karma-mezzanotte")

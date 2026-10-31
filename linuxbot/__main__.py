@@ -12,6 +12,7 @@ from . import __version__
 from .bot import Bot
 from .config import ConfigError, load_config
 from .logsetup import configure_logging
+from .memory import DatabaseLocked
 
 
 async def _main(bot: Bot) -> None:
@@ -60,14 +61,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         print(f"Configurazione valida: {len(config.commands)} comandi, {len(config.responses)} risposte, "
               f"{len(config.channels)} canali.")
+        print(f"Database: {config.database_path.expanduser().resolve()}")
         return 0
 
-    bot = Bot(config)
     try:
-        configure_logging(config, bot, verbose=args.verbose)
+        configure_logging(config, verbose=args.verbose)  # subito, per vedere anche l'apertura del database
     except OSError as exc:
         print(f"Impossibile aprire il file di log: {exc}", file=sys.stderr)
         return 2
+    try:
+        bot = Bot(config)
+    except DatabaseLocked as exc:
+        print(f"Errore: {exc}. Chiudi l'altra copia o usa un altro database (memory.database).", file=sys.stderr)
+        return 3
+    configure_logging(config, bot, verbose=args.verbose)  # ora anche statistiche e avvisi su IRC
     # !reload e SIGHUP riapplicano anche la sezione logging
     bot.reload_hooks.append(lambda cfg: configure_logging(cfg, bot, verbose=args.verbose))
     logging.getLogger("linuxbot.core").info("The Linux Bot %s avviato con %s", __version__, config.path)

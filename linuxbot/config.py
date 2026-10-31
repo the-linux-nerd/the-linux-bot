@@ -55,6 +55,7 @@ ACTIONS = {
     "karma_top": "classifica del karma",
     "karma_reset": "azzera il karma di un utente",
     "schedule_run": "esegue subito un'attività programmata (per provarla)",
+    "db_backup": "copia di sicurezza del database",
 }
 
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -562,6 +563,9 @@ class ScheduleConfig:
     channels: list[str] = field(default_factory=list) # vuoto = tutti i canali in cui è il bot
     actions: list[dict] = field(default_factory=list)
     enabled: bool = True
+    catch_up: float = 600.0   # se l'orario è passato da meno di così (bot spento/disconnesso), esegue appena può
+    late_text: str = " (prevista alle {scheduled})"  # variabile {late} nei testi, vuota se puntuale
+    per_channel: bool = True  # False: le azioni girano una volta sola, senza canale (es. backup)
 
 
 def _parse_schedules(data: dict) -> list[ScheduleConfig]:
@@ -573,7 +577,8 @@ def _parse_schedules(data: dict) -> list[ScheduleConfig]:
         where = f"schedules[{i}]"
         if not isinstance(sd, dict):
             raise ConfigError(f"{where}: deve essere una mappa")
-        _check_keys(sd, {"name", "at", "every", "days", "channels", "actions", "enabled"}, where)
+        _check_keys(sd, {"name", "at", "every", "days", "channels", "actions", "enabled", "catch_up", "late_text",
+                         "per_channel"}, where)
         name = str(sd.get("name") or f"schedule{i}")
         if name in names:
             raise ConfigError(f"{where}: nome '{name}' duplicato")
@@ -601,9 +606,18 @@ def _parse_schedules(data: dict) -> list[ScheduleConfig]:
         actions = validate_actions(sd.get("actions"), f"{where}.actions")
         if not actions:
             raise ConfigError(f"{where}: serve almeno un'azione")
+        catch_up = 600.0
+        if sd.get("catch_up") is not None:
+            parsed = parse_duration(str(sd["catch_up"]))
+            if parsed is None:
+                raise ConfigError(f"{where}.catch_up: durata non valida '{sd['catch_up']}' (es. 10m, 12h, 0)")
+            catch_up = parsed
         result.append(ScheduleConfig(name=name, at=times, every=every, days=sorted(set(days)),
                                      channels=[str(c) for c in _as_list(sd.get("channels"))],
-                                     actions=actions, enabled=bool(sd.get("enabled", True))))
+                                     actions=actions, enabled=bool(sd.get("enabled", True)),
+                                     catch_up=catch_up,
+                                     late_text=str(sd.get("late_text", ScheduleConfig.late_text)),
+                                     per_channel=bool(sd.get("per_channel", True))))
     return result
 
 

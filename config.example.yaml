@@ -198,16 +198,30 @@ karma:
 # Attività programmate: azioni a orari fissi (at: "HH:MM", anche più d'uno, con
 # days per limitarle ad alcuni giorni) oppure a intervalli (every: 30m, 2h, 1d).
 # Gli orari seguono behavior.timezone. Si provano subito con !esegui <nome>.
+# L'ultima esecuzione è salvata nel database: un riavvio non le ripete, e con
+# catch_up un'attività saltata (PC spento all'orario previsto) viene eseguita
+# appena il bot riparte, se non è passato più di quel tempo. {late} nei testi
+# diventa " (prevista alle 00:00)" quando è in ritardo, altrimenti è vuoto.
 # -----------------------------------------------------------------------------
 schedules:
   - name: karma-mezzanotte
     at: "00:00"
+    catch_up: 12h            # PC spento a mezzanotte? la pubblica appena riparte, entro le 12:00
     channels: ["#linux"]
     actions:
       - karma_top:
           size: 10
           skip_empty: true       # se nessuno ha karma, non scrive niente
-          text: "🏆 Top ten del karma{where} a mezzanotte: {list}. Grazie a tutti per l'aiuto! nick++ per ringraziare."
+          text: "🏆 Top ten del karma{where}{late}: {list}. Grazie a tutti per l'aiuto! nick++ per ringraziare."
+
+  # Copia di sicurezza del database (karma, ban, memoria) ogni notte, tenendo le
+  # ultime 14. Se il PC è spento alle 4, la fa appena si riaccende (entro un giorno).
+  - name: backup-database
+    at: "04:00"
+    catch_up: 1d
+    per_channel: false       # una volta sola, non per ogni canale
+    actions:
+      - db_backup: { directory: backups, keep: 14 }
 
   # Altri esempi (decommenta per usarli):
   # - name: regole-settimanali
@@ -279,6 +293,9 @@ bans:
 # -----------------------------------------------------------------------------
 memory:
   enabled: true
+  # Qui stanno karma, ban, chi è passato, messaggi lasciati e lo stato delle attività
+  # programmate: resta tutto fra un avvio e l'altro. Relativo alla cartella di questo
+  # file; usa un percorso assoluto (es. ~/.local/share/linuxbot/linuxbot.db) se preferisci.
   database: linuxbot.db
   retention_days: 365          # dopo quanto dimenticare chi non si è più visto
   store_messages: false        # true = "seen" riporta anche l'ultima frase scritta
@@ -722,6 +739,12 @@ commands:
     private: false
     actions:
       - karma_reset: "{arg1}"
+
+  backup:
+    description: "Copia di sicurezza del database adesso"
+    permission: admin
+    actions:
+      - db_backup: { directory: backups, keep: 14 }
 
   esegui:
     description: "Esegue subito un'attività programmata (per provarla)"
