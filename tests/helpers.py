@@ -21,7 +21,7 @@ class FakeClock:
 
 class RecordingBot(Bot):
     def __init__(self, config):
-        super().__init__(config, clock=FakeClock())
+        super().__init__(config, clock=FakeClock(), wallclock=FakeClock())
         self.sent = []
 
     def send(self, line, priority=False):

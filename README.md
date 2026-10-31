@@ -15,6 +15,9 @@ connessione, autenticazione, saluti, risposte automatiche, comandi e azioni.
   (`anyone`, `voice`, `halfop`, `op`, `admin`), cooldown, help generato in automatico.
 - **Azioni** componibili: `say`, `notice`, `me`, `kick`, `ban`, `kickban`, `op`, `voice`,
   `topic`, `mode`, `join`, `part`, `invite`, `raw`, `delay`, `reload`, `quit`...
+- **Memoria** (SQLite): ricorda chi passa e risponde a "quando è passato mario?" e
+  "chi è passato negli ultimi 3 giorni?"; si possono **lasciare messaggi** agli utenti, che il
+  bot consegna quando entrano, quando scrivono o quando chiedono "ci sono messaggi per me?".
 - **Eventi**: azioni eseguite su connessione, ingresso del bot in un canale, kick, ecc.
 - **Ricaricamento a caldo** della configurazione (comando `!reload` o `SIGHUP`).
 
@@ -53,6 +56,42 @@ Ci sono due significati di "operatore", e il bot li gestisce entrambi:
        # - raw: "SAMODE {channel} +o {botnick}"
    ```
 
+## Il saluto e la "@"
+
+Il saluto scrive il nick così com'è (`Ciao mario, benvenuto…`): i client IRC lo evidenziano
+già. Se preferisci lo stile `@mario` scrivi `@{nick}` nel testo. La `@` che compare davanti al
+nick nella lista utenti è invece lo stato di operatore: la dà l'azione `op`, che nell'esempio
+viene usata solo per gli host fidati (`greetings.rules`).
+
+## Memoria: "seen", chi è passato, messaggi lasciati
+
+Con `memory.enabled: true` il bot salva in un database SQLite (`memory.database`, relativo alla
+cartella del file di configurazione) l'ultima attività di ogni utente per canale: ingresso,
+uscita, disconnessione, kick, cambio nick, messaggi. Gli utenti in `behavior.ignore` non vengono
+registrati; i dati più vecchi di `retention_days` vengono cancellati.
+
+```
+<fabio> !seen mario                       (oppure: quando è passato mario?)
+<bot>   mario è passato 2 giorni fa (29/10/2026 21:14) in #linux, mentre si disconnetteva (Ping timeout).
+<fabio> chi è passato negli ultimi 3 giorni?      (oppure: !passati 3)
+<bot>   Passati negli ultimi 3 giorni (2): fabio (pochi secondi fa), mario (2 giorni fa)
+<fabio> TheLinuxBot: lascia un messaggio a mario: domani si aggiorna il kernel
+                                                  (oppure: !lascia mario domani si aggiorna il kernel)
+<bot>   Ok fabio, riferirò il messaggio a mario appena lo vedo.
+  ... mario entra, scrive qualcosa, oppure chiede "ci sono messaggi per me?" / !messaggi ...
+<bot>   (in privato a mario) mario, fabio ti ha lasciato un messaggio 3 ore fa: domani si aggiorna il kernel
+```
+
+I messaggi sono legati al **nick** (non all'account): li riceve chiunque usi quel nick.
+Scadono dopo `memos.expire_days` e ogni utente può averne in attesa al massimo `memos.max_pending`.
+
+Le azioni disponibili sono `seen`, `recent`, `memo_add`, `memo_read` (vedi tabella sotto), quindi
+puoi collegarle a qualsiasi comando o frase. Tutti i testi si cambiano in `memory.texts`; le chiavi sono:
+`seen`, `seen_here`, `seen_never`, `seen_self`, `seen_bot`, `seen_usage`, `event_join`, `event_part`,
+`event_quit`, `event_kick`, `event_nick`, `event_nick_from`, `event_message`, `event_message_text`,
+`recent`, `recent_none`, `recent_more`, `memo_saved`, `memo_usage`, `memo_self`, `memo_bot`,
+`memo_too_long`, `memo_full`, `memo_delivered`, `memo_none`.
+
 ## Struttura della configurazione
 
 Il file [`config.example.yaml`](config.example.yaml) è commentato riga per riga e contiene
@@ -71,6 +110,7 @@ un esempio di tutto. In sintesi:
 | `responses`  | risposte automatiche |
 | `commands`   | comandi |
 | `events`     | azioni su eventi IRC |
+| `memory`     | database, "seen", messaggi lasciati e relativi testi |
 | `logging`    | livello e file di log |
 
 ### Testi e variabili
@@ -99,7 +139,8 @@ commands:
 ```
 
 Il bot risponde a `!kick`, ai prefissi alternativi (`.kick`) e quando viene chiamato per
-nome (`TheLinuxBot: kick pippo`). Gli admin non sono soggetti a cooldown.
+nome (`TheLinuxBot: kick pippo`). Nella forma senza prefisso hanno la precedenza le risposte
+automatiche: "TheLinuxBot: lascia un messaggio a…" usa la frase, non il comando `!lascia`. Gli admin non sono soggetti a cooldown.
 Il permesso `op`/`voice` si verifica sullo stato dell'utente nel canale; in query privata
 vale lo stato in un qualsiasi canale in comune.
 
@@ -139,6 +180,10 @@ una mappa. Il canale di default è quello in cui è arrivato il comando.
 | `help` | `help` / `help: say` | `help: {method: notice}` |
 | `reload` | `reload` | `reload: {ok: "...", error: "... {error}"}` |
 | `quit` | `quit: "motivo"` | |
+| `seen` | `seen: "{arg1}"` | `seen: {nick}` |
+| `recent` | `recent: "{arg1}"` (giorni) | `recent: {days, hours, channel, all_channels}` |
+| `memo_add` | | `memo_add: {to: "{arg1}", text: "{rest}"}` |
+| `memo_read` | `memo_read` | |
 
 ### Eventi
 

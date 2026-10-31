@@ -41,6 +41,10 @@ ACTIONS = {
     "help": "elenca i comandi disponibili",
     "reload": "ricarica la configurazione",
     "quit": "disconnette il bot",
+    "seen": "dice quando un utente è stato visto l'ultima volta",
+    "recent": "elenca chi è passato negli ultimi N giorni",
+    "memo_add": "lascia un messaggio per un utente",
+    "memo_read": "consegna i messaggi in attesa per chi chiede",
 }
 
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -286,7 +290,16 @@ class Config:
     commands: dict[str, CommandConfig] = field(default_factory=dict)
     events: dict[str, list[dict]] = field(default_factory=dict)
     logging: dict[str, Any] = field(default_factory=dict)
+    memory: MemoryConfig = field(default_factory=lambda: MemoryConfig())
     path: Path | None = None
+
+    @property
+    def database_path(self) -> Path:
+        """Percorso del database; se relativo, è relativo alla cartella del file di configurazione."""
+        db = Path(self.memory.database)
+        if not db.is_absolute() and self.path is not None:
+            db = self.path.parent / db
+        return db
 
     def find_command(self, name: str) -> CommandConfig | None:
         name = name.lower()
@@ -294,6 +307,83 @@ class Config:
             if cmd.enabled and (cmd.name == name or name in cmd.aliases):
                 return cmd
         return None
+
+
+MEMORY_TEXTS = {
+    "seen_here": "{who} è qui adesso, in {where}.",
+    "seen": "{who} è stato visto l'ultima volta {ago} ({when}) in {where}, {what}.",
+    "seen_never": "Non ho mai visto {who}.",
+    "seen_self": "Sei proprio qui, {nick}!",
+    "seen_bot": "Io sono sempre qui!",
+    "seen_usage": "Di chi vuoi sapere? Uso: {prefix}seen <nick>",
+    "event_join": "mentre entrava",
+    "event_part": "mentre usciva ({detail})",
+    "event_quit": "mentre si disconnetteva ({detail})",
+    "event_kick": "mentre veniva espulso ({detail})",
+    "event_nick": "mentre cambiava nick in {detail}",
+    "event_nick_from": "dopo aver cambiato nick da {detail}",
+    "event_message": "mentre scriveva",
+    "event_message_text": "mentre scriveva: {detail}",
+    "recent": "Passati {period} ({count}): {names}",
+    "recent_none": "Non è passato nessuno {period}.",
+    "recent_more": "e altri {count}",
+    "memo_saved": "Ok {nick}, riferirò il messaggio a {recipient} appena lo vedo.",
+    "memo_usage": "Uso: {prefix}lascia <nick> <messaggio>",
+    "memo_self": "{nick}, non puoi lasciare un messaggio a te stesso.",
+    "memo_bot": "{nick}, il messaggio per me l'ho già letto ;)",
+    "memo_too_long": "{nick}, il messaggio è troppo lungo (massimo {max} caratteri).",
+    "memo_full": "{nick}, {recipient} ha già troppi messaggi in attesa.",
+    "memo_delivered": "{recipient}, {sender} ti ha lasciato un messaggio {ago}: {text}",
+    "memo_none": "Nessun messaggio per te, {nick}.",
+}
+
+
+@dataclass
+class MemosConfig:
+    deliver_on_join: bool = True
+    deliver_on_message: bool = True  # anche quando il destinatario scrive qualcosa
+    method: str = "private"          # private (query) | notice | say (nel canale)
+    delay: float = 3.0
+    max_length: int = 300
+    max_pending: int = 10            # per destinatario
+    expire_days: float = 60.0
+
+
+@dataclass
+class MemoryConfig:
+    enabled: bool = False
+    database: str = "linuxbot.db"
+    retention_days: float = 365.0
+    store_messages: bool = False     # salva il testo dell'ultimo messaggio (per "seen")
+    default_days: float = 7.0
+    max_names: int = 25
+    memos: MemosConfig = field(default_factory=MemosConfig)
+    texts: dict[str, str] = field(default_factory=lambda: dict(MEMORY_TEXTS))
+
+
+def _parse_memory(data: dict) -> MemoryConfig:
+    mem = _section(data, "memory", "")
+    _check_keys(mem, {"enabled", "database", "retention_days", "store_messages", "default_days",
+                      "max_names", "memos", "texts"}, "memory")
+    memos_d = _section(mem, "memos", "memory.")
+    _check_keys(memos_d, set(MemosConfig.__dataclass_fields__), "memory.memos")
+    memos = MemosConfig(**memos_d)
+    memos.method = str(memos.method).lower()
+    if memos.method not in ("private", "notice", "say"):
+        raise ConfigError("memory.memos.method: deve essere 'private', 'notice' o 'say'")
+    texts_d = _section(mem, "texts", "memory.")
+    _check_keys(texts_d, set(MEMORY_TEXTS), "memory.texts")
+    defaults = MemoryConfig()
+    return MemoryConfig(
+        enabled=bool(mem.get("enabled", False)),
+        database=str(mem.get("database", defaults.database)),
+        retention_days=float(mem.get("retention_days", defaults.retention_days)),
+        store_messages=bool(mem.get("store_messages", False)),
+        default_days=float(mem.get("default_days", defaults.default_days)),
+        max_names=int(mem.get("max_names", defaults.max_names)),
+        memos=memos,
+        texts={**MEMORY_TEXTS, **{k: str(v) for k, v in texts_d.items()}},
+    )
 
 
 EVENTS = ("connect", "self_join", "join", "part", "quit", "kick", "self_kick", "nick", "topic", "invite")
@@ -314,7 +404,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         raise ConfigError("il file di configurazione deve contenere una mappa YAML")
     data = _expand_env(data)
     _check_keys(data, {"server", "identity", "auth", "channels", "admins", "behavior", "variables",
-                       "greetings", "responses", "commands", "events", "logging"}, "<radice>")
+                       "greetings", "responses", "commands", "events", "logging", "memory"}, "<radice>")
 
     # server
     srv = _section(data, "server", "")
@@ -523,7 +613,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         server=server, identity=identity, auth=auth, channels=channels,
         admins=[str(a) for a in _as_list(data.get("admins"))], behavior=behavior,
         variables=variables, greetings=greetings, responses=responses, commands=commands,
-        events=events, logging=_section(data, "logging", ""), path=path,
+        events=events, logging=_section(data, "logging", ""), memory=_parse_memory(data), path=path,
     )
 
 

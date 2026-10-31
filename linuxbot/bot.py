@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from . import __version__
 from .config import Config, CommandConfig, ConfigError, ResponseConfig, load_config
+from .memory import Memory, format_ts, time_ago
 from .irc import (
     Message, build_line, irc_lower, is_channel, mask_match, parse_isupport_prefix,
     sanitize, split_message, strip_formatting,
@@ -34,9 +35,13 @@ class Channel:
 
 
 class Bot:
-    def __init__(self, config: Config, clock: Callable[[], float] = time.monotonic):
+    def __init__(self, config: Config, clock: Callable[[], float] = time.monotonic,
+                 wallclock: Callable[[], float] = time.time):
         self.config = config
         self.clock = clock
+        self.wallclock = wallclock
+        self.memory: Memory | None = None
+        self._open_memory()
         self.nick = config.identity.nick
         self.channels: dict[str, Channel] = {}
         self.hosts: dict[str, str] = {}  # nick (lower) -> nick!user@host
@@ -339,8 +344,11 @@ class Bot:
         chan = self.channels.get(key)
         if chan is not None:
             chan.users[irc_lower(msg.nick)] = set()
+        self._track(msg.nick, channel, "join", mask=msg.prefix.mask if msg.prefix else "")
         self.run_event("join", ctx)
         self._greet(msg, channel, ctx)
+        if self.memory and self.config.memory.memos.deliver_on_join:
+            self._spawn(self._deliver_memos_later(msg.nick, channel, ctx))
 
     def _on_part(self, msg: Message) -> None:
         channel = msg.params[0] if msg.params else ""
@@ -352,6 +360,7 @@ class Bot:
             chan.users.pop(irc_lower(msg.nick), None)
         ctx = self._base_context(msg, channel)
         ctx["reason"] = msg.params[1] if len(msg.params) > 1 else ""
+        self._track(msg.nick, channel, "part", ctx["reason"], msg.prefix.mask if msg.prefix else "")
         self.run_event("part", ctx)
 
     def _on_kick(self, msg: Message) -> None:
@@ -368,6 +377,7 @@ class Bot:
         chan = self.channels.get(irc_lower(channel))
         if chan:
             chan.users.pop(irc_lower(victim), None)
+        self._track(victim, channel, "kick", f"da {msg.nick}: {ctx['reason']}".rstrip(": "))
         self.run_event("kick", ctx)
 
     async def _rejoin(self, channel: str) -> None:
@@ -378,7 +388,8 @@ class Bot:
     def _on_quit(self, msg: Message) -> None:
         nick = irc_lower(msg.nick)
         for chan in self.channels.values():
-            chan.users.pop(nick, None)
+            if chan.users.pop(nick, None) is not None:
+                self._track(msg.nick, chan.name, "quit", msg.last, msg.prefix.mask if msg.prefix else "")
         self.hosts.pop(nick, None)
         ctx = self._base_context(msg)
         ctx["reason"] = msg.last
@@ -391,6 +402,9 @@ class Bot:
         for chan in self.channels.values():
             if old in chan.users:
                 chan.users[irc_lower(new)] = chan.users.pop(old)
+                if not self._is_me(new):
+                    self._track(msg.nick, chan.name, "nick", new)
+                    self._track(new, chan.name, "nick_from", msg.nick)
         if old in self.hosts:
             self.hosts[irc_lower(new)] = self.hosts.pop(old).replace(msg.nick, new, 1)
         ctx = self._base_context(msg)
@@ -454,19 +468,24 @@ class Bot:
         ctx = self._base_context(msg, channel)
         text = strip_formatting(text).strip()
         ctx["message"] = text
+        if not private:
+            self._track(msg.nick, channel, "message", text if self.config.memory.store_messages else "", mask)
+        if self.memory and self.config.memory.memos.deliver_on_message:
+            ctx["_memos_delivered"] = self._deliver_memos(msg.nick, channel, ctx)
 
         command_text = self._extract_command(text)
         addressed = False
+        bare_command = None  # "Bot: help" senza prefisso: comando solo se nessuna risposta corrisponde
         if command_text is None and beh.answer_when_addressed:
             m = re.match(rf"^{re.escape(self.nick)}[:,]?\s+(.*)$", text, re.IGNORECASE)
             if m:
                 addressed = True
                 rest = m.group(1).strip()
                 command_text = self._extract_command(rest)
-                if command_text is None and rest.split() and self.config.find_command(rest.split()[0]):
-                    command_text = rest
                 if command_text is None:
                     text = rest
+                    if rest.split() and self.config.find_command(rest.split()[0]):
+                        bare_command = rest
         if private:
             addressed = True
         elif re.search(rf"(?<!\w){re.escape(self.nick)}(?!\w)", text, re.IGNORECASE):
@@ -474,8 +493,8 @@ class Bot:
 
         if command_text is not None:
             self._handle_command(command_text, ctx, is_admin, private)
-        else:
-            self._handle_responses(text, ctx, is_admin, private, addressed)
+        elif not self._handle_responses(text, ctx, is_admin, private, addressed) and bare_command:
+            self._handle_command(bare_command, ctx, is_admin, private)
 
     def _extract_command(self, text: str) -> str | None:
         for prefix in self.config.behavior.command_prefixes:
@@ -546,7 +565,9 @@ class Bot:
 
     # ------------------------------------------------------------------ risposte automatiche
 
-    def _handle_responses(self, text: str, ctx: dict, is_admin: bool, private: bool, addressed: bool) -> None:
+    def _handle_responses(self, text: str, ctx: dict, is_admin: bool, private: bool, addressed: bool) -> bool:
+        """Esegue le risposte che corrispondono; restituisce True se almeno una è scattata."""
+        fired = False
         for resp in self.config.responses:
             if private and not resp.private:
                 continue
@@ -564,7 +585,7 @@ class Bot:
             key = ("response", resp.name, irc_lower(ctx["channel"] or ctx["nick"]))
             if not self._cooldown_ok(key, resp.cooldown):
                 if resp.stop:
-                    return
+                    return True
                 continue
             rctx = dict(ctx)
             rctx["match"] = match.group(0)
@@ -573,8 +594,10 @@ class Bot:
             rctx.update({k: v or "" for k, v in match.groupdict().items()})
             log.info("Risposta '%s' per %s in %s", resp.name, ctx["nick"], ctx["channel"] or "privato")
             self._run_reply_and_actions(resp, rctx)
+            fired = True
             if resp.stop:
-                return
+                return True
+        return fired
 
     # ------------------------------------------------------------------ saluti
 
@@ -906,6 +929,168 @@ class Bot:
         reason = self._r(value, ctx) or "Arrivederci!"
         self.send(build_line("QUIT", reason))
 
+    # ------------------------------------------------------------------ memoria: seen e messaggi
+
+    def _open_memory(self) -> None:
+        cfg = self.config
+        path = str(cfg.database_path) if cfg.memory.enabled else None
+        if self.memory is not None and self.memory.path == path:
+            return
+        if self.memory is not None:
+            self.memory.close()
+            self.memory = None
+        if path is not None:
+            self.memory = Memory(path, clock=lambda: self.wallclock())
+            self.memory.prune(cfg.memory.retention_days)
+            self._last_prune = self.wallclock()
+            log.info("Memoria su %s", path)
+
+    def _track(self, nick: str, channel: str, event: str, detail: str = "", mask: str = "") -> None:
+        if self.memory is None or not nick or self._is_me(nick):
+            return
+        mask = mask or self.hosts.get(irc_lower(nick), "")
+        if mask and any(mask_match(m, mask) for m in self.config.behavior.ignore):
+            return
+        self.memory.record(nick, channel, event, detail, mask)
+        if self.wallclock() - self._last_prune > 86400:
+            self.memory.prune(self.config.memory.retention_days)
+            self._last_prune = self.wallclock()
+
+    def _mem_text(self, key: str, ctx: dict, **extra: Any) -> str:
+        return render(self.config.memory.texts[key], {**ctx, **extra})
+
+    def _present_in(self, nick: str) -> list[str]:
+        return [c.name for c in self.channels.values() if irc_lower(nick) in c.users]
+
+    def _deliver_memos(self, nick: str, channel: str, ctx: dict) -> int:
+        if self.memory is None:
+            return 0
+        memos_cfg = self.config.memory.memos
+        memos = self.memory.pending(nick, memos_cfg.expire_days)
+        if not memos:
+            return 0
+        now = self.wallclock()
+        for memo in memos:
+            text = self._mem_text("memo_delivered", ctx, recipient=nick, sender=memo.sender, text=memo.text,
+                                  ago=time_ago(memo.ts, now), when=format_ts(memo.ts),
+                                  from_channel=memo.channel or "privato")
+            if memos_cfg.method == "notice":
+                self.notice(nick, text)
+            elif memos_cfg.method == "say" and channel:
+                self.say(channel, text)
+            else:
+                self.say(nick, text)
+        self.memory.mark_delivered(memos)
+        log.info("Consegnati %d messaggi a %s", len(memos), nick)
+        return len(memos)
+
+    async def _deliver_memos_later(self, nick: str, channel: str, ctx: dict) -> None:
+        delay = self.config.memory.memos.delay
+        if delay:
+            await asyncio.sleep(delay)
+        chan = self.channels.get(irc_lower(channel))
+        if chan is not None and irc_lower(nick) not in chan.users:
+            return  # è già uscito: glieli diamo la prossima volta
+        self._deliver_memos(nick, channel, ctx)
+
+    def _action_seen(self, value: Any, ctx: dict) -> None:
+        raw = value.get("nick", "{arg1}") if isinstance(value, dict) else (value or "{arg1}")
+        who = self._r(raw, ctx).strip().strip("?!.,:;'\"")
+        target = ctx["_target"]
+        if not who:
+            self.say(target, self._mem_text("seen_usage", ctx))
+        elif self._is_me(who):
+            self.say(target, self._mem_text("seen_bot", ctx, who=who))
+        elif irc_lower(who) == irc_lower(ctx.get("nick", "")):
+            self.say(target, self._mem_text("seen_self", ctx, who=who))
+        elif where := self._present_in(who):
+            self.say(target, self._mem_text("seen_here", ctx, who=who, where=", ".join(where)))
+        else:
+            entry = self.memory.last_seen(who) if self.memory else None
+            if entry is None:
+                self.say(target, self._mem_text("seen_never", ctx, who=who))
+                return
+            key = f"event_{entry.event}"
+            if entry.event == "message" and entry.detail:
+                key = "event_message_text"
+            what = self._mem_text(key, ctx, detail=entry.detail or "-") if key in self.config.memory.texts else ""
+            self.say(target, self._mem_text("seen", ctx, who=entry.nick, where=entry.channel, what=what,
+                                            ago=time_ago(entry.ts, self.wallclock()), when=format_ts(entry.ts),
+                                            detail=entry.detail))
+
+    @staticmethod
+    def _number(text: str) -> float | None:
+        try:
+            value = float(str(text).replace(",", "."))
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    def _action_recent(self, value: Any, ctx: dict) -> None:
+        mem = self.config.memory
+        opts = value if isinstance(value, dict) else {"days": value if value is not None else "{arg1}"}
+        hours = self._number(self._r(opts.get("hours"), ctx)) if opts.get("hours") is not None else None
+        if hours is not None:
+            seconds = hours * 3600
+        else:
+            days = self._number(self._r(opts.get("days", "{arg1}"), ctx)) or mem.default_days
+            seconds = days * 86400
+        seconds = min(seconds, mem.retention_days * 86400)
+        hours_total, days_total = seconds / 3600, round(seconds / 86400)
+        if hours_total < 1.5:
+            period = "nell'ultima ora"
+        elif hours is not None or hours_total < 24:
+            period = f"nelle ultime {round(hours_total)} ore"
+        elif days_total == 1:
+            period = "nelle ultime 24 ore"
+        else:
+            period = f"negli ultimi {days_total} giorni"
+        channel = self._r(opts.get("channel"), ctx) if opts.get("channel") else ctx.get("channel", "")
+        if opts.get("all_channels"):
+            channel = ""
+        entries = self.memory.recent(seconds, channel or None, {irc_lower(self.nick)}) if self.memory else []
+        target = ctx["_target"]
+        if not entries:
+            self.say(target, self._mem_text("recent_none", ctx, period=period))
+            return
+        now = self.wallclock()
+        shown = entries[:mem.max_names]
+        names = ", ".join(f"{e.nick} ({time_ago(e.ts, now)})" for e in shown)
+        if len(entries) > len(shown):
+            names += " " + self._mem_text("recent_more", ctx, count=len(entries) - len(shown))
+        self.say(target, self._mem_text("recent", ctx, period=period, count=len(entries), names=names))
+
+    _NICK_RE = re.compile(r"^[A-Za-z\[\]\\`_^{|}][A-Za-z0-9\[\]\\`_^{|}-]*$")
+
+    def _action_memo_add(self, value: Any, ctx: dict) -> None:
+        opts = value if isinstance(value, dict) else {}
+        recipient = self._r(opts.get("to", "{arg1}"), ctx).strip().strip(":,")
+        text = self._r(opts.get("text", "{rest}"), ctx).strip()
+        target, memos_cfg = ctx["_target"], self.config.memory.memos
+        if self.memory is None:
+            log.warning("memo_add: la memoria è disabilitata (memory.enabled)")
+            return
+        if not recipient or not text or not self._NICK_RE.match(recipient):
+            self.say(target, self._mem_text("memo_usage", ctx))
+        elif irc_lower(recipient) == irc_lower(ctx.get("nick", "")):
+            self.say(target, self._mem_text("memo_self", ctx, recipient=recipient))
+        elif self._is_me(recipient):
+            self.say(target, self._mem_text("memo_bot", ctx, recipient=recipient))
+        elif len(text) > memos_cfg.max_length:
+            self.say(target, self._mem_text("memo_too_long", ctx, recipient=recipient, max=memos_cfg.max_length))
+        elif self.memory.pending_count(recipient) >= memos_cfg.max_pending:
+            self.say(target, self._mem_text("memo_full", ctx, recipient=recipient))
+        else:
+            self.memory.add_memo(ctx.get("nick", "?"), recipient, text, ctx.get("channel", ""))
+            log.info("Messaggio di %s per %s salvato", ctx.get("nick"), recipient)
+            self.say(target, self._mem_text("memo_saved", ctx, recipient=recipient))
+
+    def _action_memo_read(self, value: Any, ctx: dict) -> None:
+        nick = ctx.get("nick", "")
+        delivered = self._deliver_memos(nick, ctx.get("channel", ""), ctx)
+        if not delivered and not ctx.get("_memos_delivered"):
+            self.say(ctx["_target"], self._mem_text("memo_none", ctx))
+
     # ------------------------------------------------------------------ reload
 
     def reload(self) -> None:
@@ -914,6 +1099,7 @@ class Bot:
             raise ConfigError("nessun file di configurazione da ricaricare")
         new = load_config(self.config.path)
         self.config = new
+        self._open_memory()
         log.info("Configurazione ricaricata da %s", new.path)
         if self.registered:
             self._spawn(self._join_channels())
@@ -922,6 +1108,9 @@ class Bot:
         self._quitting = True
         if self._writer is not None:
             self._write(self._writer, build_line("QUIT", "Arrivederci!"))
+        if self.memory is not None:
+            self.memory.close()
+            self.memory = None
 
 
 def _redact(line: str) -> str:

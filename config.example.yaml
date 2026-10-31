@@ -96,6 +96,33 @@ variables:
   rules_url: "https://the-linux-nerd.example.org/regole"
   pastebin: "https://paste.debian.net"
 
+# -----------------------------------------------------------------------------
+# Memoria: il bot ricorda chi passa (per "seen" e "chi è passato") e conserva
+# i messaggi lasciati per gli utenti. Usa un database SQLite; se il percorso è
+# relativo, è relativo alla cartella di questo file.
+# -----------------------------------------------------------------------------
+memory:
+  enabled: true
+  database: linuxbot.db
+  retention_days: 365          # dopo quanto dimenticare chi non si è più visto
+  store_messages: false        # true = "seen" riporta anche l'ultima frase scritta
+  default_days: 7              # per "chi è passato" senza numero di giorni
+  max_names: 25                # nick elencati al massimo, poi "e altri N"
+  memos:
+    deliver_on_join: true      # consegna quando il destinatario entra in canale
+    deliver_on_message: true   # ...e anche quando scrive qualcosa (se era già dentro)
+    method: private            # private (query) | notice | say (nel canale)
+    delay: 3                   # secondi dopo l'ingresso (dopo il saluto)
+    max_length: 300
+    max_pending: 10            # messaggi in attesa al massimo per destinatario
+    expire_days: 60            # i messaggi non consegnati scadono
+  # Tutti i testi sono personalizzabili; questi sono alcuni esempi, l'elenco
+  # completo delle chiavi è nel README. Variabili: {who} {where} {what} {ago}
+  # {when} {period} {count} {names} {recipient} {sender} {text} {max}.
+  texts:
+    seen: "{who} è passato {ago} ({when}) in {where}, {what}."
+    memo_delivered: "📬 {recipient}, {sender} ti ha lasciato un messaggio {ago}: {text}"
+
 logging:
   level: INFO                        # DEBUG mostra tutto il traffico IRC
   file: null                         # es. linuxbot.log
@@ -109,6 +136,10 @@ greetings:
   delay: 2                           # secondi di attesa (se esce prima, niente saluto)
   cooldown: 3600                     # non risalutare la stessa persona per un'ora
   method: say                        # say = nel canale, notice = in privato
+  # Il nick viene scritto così com'è: i client IRC lo evidenziano già, non serve la "@".
+  # Se preferisci lo stile "@nick" basta scrivere "@{nick}" nel testo.
+  # (La "@" davanti al nick nella lista utenti indica invece un operatore: la dà
+  #  l'azione "op", qui sotto usata solo nella regola per gli host fidati.)
   messages:
     - "Ciao {nick}, benvenuto su {channel}! Scrivi {prefix}help per vedere cosa so fare."
     - "Benvenuto {nick}! Siamo in {users} su {channel}. Le regole: {rules_url}"
@@ -169,6 +200,44 @@ responses:
     addressed: true
     reply: ["Prego {nick}!", "Figurati!", "Di niente :)"]
 
+  # --- memoria: domande in linguaggio naturale --------------------------------
+  - name: chi-e-passato
+    match: regex
+    patterns: ['chi (è|e'') passato (negli|in questi) ultimi (?P<giorni>\d+) giorni']
+    cooldown: 10
+    actions:
+      - recent: { days: "{giorni}" }
+
+  - name: chi-e-passato-oggi
+    match: regex
+    patterns: ['chi (è|e'') passato (oggi|nelle ultime 24 ore)']
+    cooldown: 10
+    actions:
+      - recent: { hours: 24 }
+
+  - name: quando-e-passato
+    match: regex
+    patterns: ['quando (è|e'') passato (?P<chi>[^\s?]+)']
+    cooldown: 5
+    actions:
+      - seen: "{chi}"
+
+  - name: messaggi-per-me
+    match: regex
+    patterns: ['ci sono (dei )?messaggi per me', 'ho (dei )?messaggi']
+    cooldown: 0
+    actions:
+      - memo_read
+
+  - name: lascia-messaggio
+    match: regex
+    # "TheLinuxBot: lascia un messaggio a mario: ricordati la riunione"
+    patterns: ['^(lascia|di|dì) (un messaggio )?a (?P<chi>[^\s:,]+)[:,]?\s+(?P<testo>.+)$']
+    addressed: true
+    cooldown: 0
+    actions:
+      - memo_add: { to: "{chi}", text: "{testo}" }
+
   - name: insulto
     match: word
     patterns: ["windows fa schifo"]
@@ -225,6 +294,35 @@ commands:
     min_args: 1
     actions:
       - me: "abbraccia forte {arg1}"
+
+  # --- memoria -----------------------------------------------------------------
+  seen:
+    aliases: [visto]
+    description: "Quando è stato visto l'ultima volta un utente"
+    usage: "<nick>"
+    actions:
+      - seen: "{arg1}"
+
+  passati:
+    aliases: [recenti, recent]
+    description: "Chi è passato negli ultimi N giorni (default 7)"
+    usage: "[giorni]"
+    cooldown: 10
+    actions:
+      - recent: "{arg1}"
+
+  lascia:
+    aliases: [tell, memo]
+    description: "Lascia un messaggio a un utente, glielo riferirò appena lo vedo"
+    usage: "<nick> <messaggio>"
+    min_args: 2
+    actions:
+      - memo_add: { to: "{arg1}", text: "{rest}" }
+
+  messaggi:
+    description: "Ti consegna i messaggi che ti hanno lasciato"
+    actions:
+      - memo_read
 
   # --- comandi di moderazione ------------------------------------------------
   kick:
