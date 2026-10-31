@@ -54,6 +54,7 @@ ACTIONS = {
     "karma_show": "mostra il karma di un utente",
     "karma_top": "classifica del karma",
     "karma_reset": "azzera il karma di un utente",
+    "schedule_run": "esegue subito un'attività programmata (per provarla)",
 }
 
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -526,6 +527,71 @@ def _parse_karma(data: dict) -> KarmaConfig:
     return cfg
 
 
+WEEKDAYS = {  # lunedì = 0
+    "lun": 0, "lunedi": 0, "lunedì": 0, "mon": 0, "monday": 0,
+    "mar": 1, "martedi": 1, "martedì": 1, "tue": 1, "tuesday": 1,
+    "mer": 2, "mercoledi": 2, "mercoledì": 2, "wed": 2, "wednesday": 2,
+    "gio": 3, "giovedi": 3, "giovedì": 3, "thu": 3, "thursday": 3,
+    "ven": 4, "venerdi": 4, "venerdì": 4, "fri": 4, "friday": 4,
+    "sab": 5, "sabato": 5, "sat": 5, "saturday": 5,
+    "dom": 6, "domenica": 6, "sun": 6, "sunday": 6,
+}
+
+
+@dataclass
+class ScheduleConfig:
+    name: str
+    at: list[str] = field(default_factory=list)      # orari "HH:MM" (ogni giorno, o nei giorni scelti)
+    every: float = 0.0                                # oppure ogni N secondi (da durate come "30m", "2h")
+    days: list[int] = field(default_factory=list)     # vuoto = tutti i giorni
+    channels: list[str] = field(default_factory=list) # vuoto = tutti i canali in cui è il bot
+    actions: list[dict] = field(default_factory=list)
+    enabled: bool = True
+
+
+def _parse_schedules(data: dict) -> list[ScheduleConfig]:
+    from .memory import parse_duration
+
+    result = []
+    names = set()
+    for i, sd in enumerate(_as_list(data.get("schedules"))):
+        where = f"schedules[{i}]"
+        if not isinstance(sd, dict):
+            raise ConfigError(f"{where}: deve essere una mappa")
+        _check_keys(sd, {"name", "at", "every", "days", "channels", "actions", "enabled"}, where)
+        name = str(sd.get("name") or f"schedule{i}")
+        if name in names:
+            raise ConfigError(f"{where}: nome '{name}' duplicato")
+        names.add(name)
+        times = []
+        for t in _as_list(sd.get("at")):
+            m = re.fullmatch(r"(\d{1,2}):(\d{2})", str(t).strip())
+            if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+                raise ConfigError(f"{where}.at: orario non valido '{t}' (formato HH:MM, es. 00:00 o 18:30)")
+            times.append(f"{int(m.group(1)):02d}:{m.group(2)}")
+        every = 0.0
+        if sd.get("every") is not None:
+            parsed = parse_duration(str(sd["every"]))
+            if not parsed or parsed < 60:
+                raise ConfigError(f"{where}.every: durata non valida '{sd['every']}' (minimo 1m, es. 30m, 2h, 1d)")
+            every = parsed
+        if bool(times) == bool(every):
+            raise ConfigError(f"{where}: indica 'at' (orari) oppure 'every' (intervallo), non entrambi né nessuno")
+        days = []
+        for d in _as_list(sd.get("days")):
+            key = str(d).strip().lower()
+            if key not in WEEKDAYS:
+                raise ConfigError(f"{where}.days: giorno '{d}' non valido (es. lun, mar, ..., dom)")
+            days.append(WEEKDAYS[key])
+        actions = validate_actions(sd.get("actions"), f"{where}.actions")
+        if not actions:
+            raise ConfigError(f"{where}: serve almeno un'azione")
+        result.append(ScheduleConfig(name=name, at=times, every=every, days=sorted(set(days)),
+                                     channels=[str(c) for c in _as_list(sd.get("channels"))],
+                                     actions=actions, enabled=bool(sd.get("enabled", True))))
+    return result
+
+
 @dataclass
 class SelfOpConfig:
     enabled: bool = False
@@ -574,6 +640,7 @@ class BehaviorConfig:
     unknown_command_reply: str | None = None
     permission_denied_reply: str | None = "{nick}: non hai i permessi per usare {command}."
     cooldown_reply: str | None = None
+    timezone: str = ""  # fuso orario per orari, {date} e {time} (es. Europe/Rome); vuoto = quello del sistema
 
 
 @dataclass
@@ -675,6 +742,7 @@ class Config:
     about: AboutConfig = field(default_factory=AboutConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     karma: KarmaConfig = field(default_factory=KarmaConfig)
+    schedules: list[ScheduleConfig] = field(default_factory=list)
     path: Path | None = None
 
     def resolve(self, path: str) -> Path:
@@ -876,7 +944,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         raise ConfigError("il file di configurazione deve contenere una mappa YAML")
     data = _expand_env(data)
     _check_keys(data, {"server", "identity", "auth", "channels", "admins", "behavior", "variables",
-                       "greetings", "responses", "commands", "events", "logging", "memory", "bans", "self_op", "about", "search", "karma"}, "<radice>")
+                       "greetings", "responses", "commands", "events", "logging", "memory", "bans", "self_op", "about", "search", "karma", "schedules"}, "<radice>")
 
     # server
     srv = _section(data, "server", "")
@@ -973,6 +1041,14 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         **{k: beh_d[k] for k in BehaviorConfig.__dataclass_fields__ if k in beh_d and k != "command_prefixes"},
     )
     behavior.ignore = [str(m) for m in _as_list(behavior.ignore)]
+    behavior.timezone = str(behavior.timezone or "")
+    if behavior.timezone:
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(behavior.timezone)
+        except Exception:
+            raise ConfigError(f"behavior.timezone: fuso orario sconosciuto '{behavior.timezone}' "
+                              "(es. Europe/Rome)") from None
 
     # variables
     variables = {str(k): str(v) for k, v in _section(data, "variables", "").items()}
@@ -1105,7 +1181,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         server=server, identity=identity, auth=auth, channels=channels,
         admins=[str(a) for a in _as_list(data.get("admins"))], behavior=behavior,
         variables=variables, greetings=greetings, responses=responses, commands=commands,
-        events=events, logging=_parse_logging(data), memory=_parse_memory(data), bans=_parse_bans(data), self_op=_parse_self_op(data), about=_parse_about(data), search=_parse_search(data), karma=_parse_karma(data),
+        events=events, logging=_parse_logging(data), memory=_parse_memory(data), bans=_parse_bans(data), self_op=_parse_self_op(data), about=_parse_about(data), search=_parse_search(data), karma=_parse_karma(data), schedules=_parse_schedules(data),
         path=path,
     )
 

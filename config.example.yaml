@@ -105,6 +105,7 @@ behavior:
   unknown_command_reply: null        # es. "{nick}: comando sconosciuto, prova {prefix}help"
   permission_denied_reply: "{nick}: non hai i permessi per usare {command}."
   cooldown_reply: null               # es. "Calma {nick}, riprova fra poco."
+  timezone: Europe/Rome              # per le attività programmate, {date} e {time}
 
 # Variabili personalizzate utilizzabili in tutti i testi.
 variables:
@@ -177,6 +178,36 @@ karma:
   announce: true             # "mario ha ora 12 punti karma (+1 da anna)"
   announce_reset: false
   top_size: 10
+
+# -----------------------------------------------------------------------------
+# Attività programmate: azioni a orari fissi (at: "HH:MM", anche più d'uno, con
+# days per limitarle ad alcuni giorni) oppure a intervalli (every: 30m, 2h, 1d).
+# Gli orari seguono behavior.timezone. Si provano subito con !esegui <nome>.
+# -----------------------------------------------------------------------------
+schedules:
+  - name: karma-mezzanotte
+    at: "00:00"
+    channels: ["#linux"]
+    actions:
+      - karma_top:
+          size: 10
+          skip_empty: true       # se nessuno ha karma, non scrive niente
+          text: "🏆 Top ten del karma{where} a mezzanotte: {list}. Grazie a tutti per l'aiuto! nick++ per ringraziare."
+
+  # Altri esempi (decommenta per usarli):
+  # - name: regole-settimanali
+  #   at: "21:00"
+  #   days: [ven]
+  #   channels: ["#linux"]
+  #   actions:
+  #     - say: "Promemoria: le regole del canale sono qui {rules_url}. Buon weekend!"
+  # - name: consiglio
+  #   every: 6h
+  #   actions:
+  #     - say:
+  #         - "💡 Lo sapevi? Ctrl+R nella shell cerca nella cronologia dei comandi."
+  #         - "💡 Lo sapevi? 'sudo !!' ripete l'ultimo comando con sudo."
+  #         - "💡 Lo sapevi? 'cd -' torna alla cartella precedente."
 
 # -----------------------------------------------------------------------------
 # Op per il bot: appena entra in un canale controlla di essere op e, se no, lo
@@ -658,6 +689,15 @@ commands:
     private: false
     actions:
       - karma_reset: "{arg1}"
+
+  esegui:
+    description: "Esegue subito un'attività programmata (per provarla)"
+    usage: "<nome attività>"
+    permission: admin
+    min_args: 1
+    examples: ["{prefix}esegui karma-mezzanotte"]
+    actions:
+      - schedule_run: "{arg1}"
 
   # --- memoria -----------------------------------------------------------------
   seen:

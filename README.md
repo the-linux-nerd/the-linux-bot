@@ -30,6 +30,8 @@ connessione, autenticazione, saluti, risposte automatiche, comandi e azioni.
   ArchWiki: `!cerca`, `?? domanda`, "TheLinuxBot: come faccio a ...?".
 - **Karma** del canale: `nick++`, `nick--`, "grazie nick", `!karma`, `!top`; punteggi
   permanenti, regole anti-abuso, azzeramento al ban.
+- **Attività programmate**: azioni a orari fissi o a intervalli, ad esempio la top ten del
+  karma ogni giorno a mezzanotte.
 - **Log** per debug e ottimizzazione: livelli per area, rotazione dei file, formato JSON,
   password sempre nascoste, avvisi agli admin su IRC, log delle chat per canale, `!stats` con
   tempi e contatori.
@@ -237,6 +239,7 @@ un esempio di tutto. In sintesi:
 | `about`      | come il bot si presenta e spiega comandi e funzioni |
 | `search`     | ricerca su Stack Exchange e wiki MediaWiki |
 | `karma`      | karma del canale e relative regole |
+| `schedules`  | attività a orari fissi o a intervalli |
 | `channels`   | canali (nome o `{name, key, owners}`) |
 | `admins`     | maschere `nick!user@host` degli amministratori del bot |
 | `behavior`   | prefissi dei comandi, utenti ignorati, anti-flood, riconnessione, messaggi di sistema |
@@ -325,7 +328,8 @@ una mappa. Il canale di default è quello in cui è arrivato il comando.
 | `explain` | `explain: "{args}"` (vuoto = presentazione) | `explain: {topic, method}` |
 | `search` | `search: "{args}"` | `search: {query, providers: [unix, so]}` |
 | `karma_change` | `karma_change: "{arg1}"` | `karma_change: {nick, delta, quiet}` |
-| `karma_show` / `karma_top` / `karma_reset` | `karma_show: "{target}"` | `karma_top: {size, worst}` |
+| `karma_show` / `karma_top` / `karma_reset` | `karma_show: "{target}"` | `karma_top: {size, worst, skip_empty, text}` |
+| `schedule_run` | `schedule_run: "{arg1}"` | `schedule_run: {name}` |
 | `stats` | `stats` | `stats: {section, method}` |
 | `seen` | `seen: "{arg1}"` | `seen: {nick}` |
 | `recent` | `recent: "{arg1}"` (giorni) | `recent: {days, hours, channel, all_channels}` |
@@ -419,8 +423,48 @@ permanenti.
 - **Ambito**: `scope: channel` tiene una classifica per canale, `scope: global` una sola;
   `channels` limita il karma ad alcuni canali.
 - Il karma è legato al **nick**: un cambio di nick non lo porta con sé.
+- **Top ten di mezzanotte**: nella config d'esempio un'attività programmata
+  (`schedules`, vedi sotto) pubblica ogni giorno alle 00:00 la top ten di `#linux`.
 - Azioni: `karma_change` (`{nick, delta: 1|-1, quiet}`), `karma_show`, `karma_top` (`{size,
-  worst}`), `karma_reset`. Testi in `karma.texts`.
+  worst, skip_empty, text}`), `karma_reset`. Testi in `karma.texts`.
+
+## Attività programmate
+
+La sezione `schedules` esegue azioni a orari fissi (`at`) o a intervalli (`every`), nei canali
+indicati (o in tutti quelli in cui è il bot). Gli orari seguono `behavior.timezone`
+(es. `Europe/Rome`, ora legale compresa); se manca, quello del sistema.
+
+```yaml
+behavior:
+  timezone: Europe/Rome
+
+schedules:
+  - name: karma-mezzanotte
+    at: "00:00"
+    channels: ["#linux"]
+    actions:
+      - karma_top:
+          size: 10
+          skip_empty: true      # niente messaggio se nessuno ha karma
+          text: "🏆 Top ten del karma{where} a mezzanotte: {list}"
+  - name: regole-del-venerdi
+    at: ["09:00", "21:00"]      # anche più orari
+    days: [ven]                 # lun mar mer gio ven sab dom (anche per esteso o in inglese)
+    actions:
+      - say: "Promemoria: le regole sono qui {rules_url}"
+  - name: consiglio
+    every: 6h                   # 30m, 2h, 1d... (minimo 1m)
+    actions:
+      - say: ["💡 Ctrl+R cerca nella cronologia", "💡 'cd -' torna alla cartella precedente"]
+```
+
+- Qualsiasi azione va bene: `say`, `karma_top`, `topic`, `mode`, `raw`...; nei testi `{channel}`
+  è il canale in cui l'attività sta girando e `{schedule}` il suo nome.
+- `!esegui <nome>` (admin) la esegue subito, per provarla senza aspettare l'orario.
+- Il bot controlla le attività ogni minuto. Se resta bloccato per qualche minuto (fino a 10),
+  esegue quelle che ha saltato; se è disconnesso all'orario previsto, quell'esecuzione si perde.
+  L'ultima esecuzione è ricordata in memoria: un riavvio proprio nel minuto dell'attività
+  potrebbe ripeterla.
 
 ## Log, debug e statistiche
 

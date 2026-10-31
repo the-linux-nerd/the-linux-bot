@@ -18,6 +18,7 @@ from .about import AboutMixin
 from .bans import BanMixin
 from .chatlog import ChatLog
 from .karma import KarmaMixin
+from .scheduler import SchedulerMixin
 from .search import Searcher, http_get
 from .stats import Stats
 from .config import Config, CommandConfig, ConfigError, ResponseConfig, load_config
@@ -48,7 +49,7 @@ class Channel:
     topic: str = ""
 
 
-class Bot(AboutMixin, BanMixin, KarmaMixin):
+class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
     def __init__(self, config: Config, clock: Callable[[], float] = time.monotonic,
                  wallclock: Callable[[], float] = time.time):
         self.config = config
@@ -61,6 +62,9 @@ class Bot(AboutMixin, BanMixin, KarmaMixin):
         self.searcher: Searcher | None = Searcher(config.search) if config.search.enabled else None
         self.memory: Memory | None = None
         self._banlist_buffer: dict = {}
+        self._schedule_last: dict[str, str] = {}
+        self._schedule_every_last: dict[str, float] = {}
+        self._schedule_checked = None
         self._op_tasks: dict[str, asyncio.Task] = {}
         self._identified: asyncio.Event | None = None
         self._ban_resync: dict = {}
@@ -77,6 +81,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin):
         self._nick_attempt = 0
         self._sasl_in_progress = False
         self._tasks: set[asyncio.Task] = set()
+        self._background: set[asyncio.Task] = set()
         self._queue: asyncio.Queue[str] | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._quitting = False
@@ -122,7 +127,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin):
             await self._read_loop(reader)
         finally:
             sender.cancel()
-            for task in list(self._tasks):
+            for task in list(self._tasks) + list(self._background):
                 task.cancel()
             writer.close()
             try:
@@ -291,7 +296,8 @@ class Bot(AboutMixin, BanMixin, KarmaMixin):
         self.run_event("connect", self._base_context())
         self._spawn(self._join_channels(wait))
         if self.config.bans.enabled:
-            self._spawn(self._ban_expiry_loop())
+            self._spawn(self._ban_expiry_loop(), background=True)
+        self._spawn(self._scheduler_loop(), background=True)
 
     async def _join_channels(self, wait: float = 0.0) -> None:
         if self._identified is not None:
@@ -804,7 +810,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin):
         return irc_lower(channel) in {irc_lower(c) for c in channels}
 
     def _base_context(self, msg: Message | None = None, channel: str = "") -> dict[str, Any]:
-        now = datetime.now()
+        now = self.now_local()
         ctx: dict[str, Any] = dict(self.config.variables)
         nick = msg.nick if msg else ""
         ctx.update(
@@ -822,12 +828,14 @@ class Bot(AboutMixin, BanMixin, KarmaMixin):
         ctx["_target"] = channel or nick
         return ctx
 
-    def _spawn(self, coro) -> asyncio.Task:
+    def _spawn(self, coro, background: bool = False) -> asyncio.Task:
+        """Avvia un task. ``background``: cicli che durano quanto la connessione (non attesi da drain)."""
         task = asyncio.ensure_future(coro)
-        self._tasks.add(task)
+        group = self._background if background else self._tasks
+        group.add(task)
 
         def done(t: asyncio.Task) -> None:
-            self._tasks.discard(t)
+            group.discard(t)
             if not t.cancelled() and t.exception():
                 log.error("Errore in un task del bot", exc_info=t.exception())
 

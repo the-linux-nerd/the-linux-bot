@@ -150,11 +150,13 @@ class KarmaMixin:
         rows = store.karma_top(self._karma_scope(channel), max(1, min(size, 25)), worst=bool(opts.get("worst")))
         where = self._karma_where(channel)
         if not rows:
-            self.say(ctx["_target"], self._kt("top_empty", ctx, where=where))
+            if not opts.get("skip_empty"):
+                self.say(ctx["_target"], self._kt("top_empty", ctx, where=where))
             return
         items = ", ".join(self._kt("top_item", ctx, pos=i, nick=r.nick, score=r.score)
                           for i, r in enumerate(rows, start=1))
-        self.say(ctx["_target"], self._kt("top", ctx, where=where, list=items))
+        template = str(opts["text"]) if opts.get("text") else self.config.karma.texts["top"]
+        self.say(ctx["_target"], render(template, {**ctx, "where": where, "list": items, "count": len(rows)}))
 
     def _action_karma_reset(self: "Bot", value: Any, ctx: dict) -> None:
         store = self.karma_store
