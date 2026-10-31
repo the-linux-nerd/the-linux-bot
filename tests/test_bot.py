@@ -141,12 +141,33 @@ class CommandTest(BotTestCase):
 
     async def test_help(self):
         out = await self.say(self.bot, "!help")
-        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0].startswith("NOTICE user :Comandi: "))
         self.assertIn("!regole", out[0])
-        self.assertNotIn("!segreto", out[0])
-        self.assertNotIn("!kick", out[0])  # utente normale: niente comandi da op
+        self.assertNotIn("!segreto", " ".join(out))
+        self.assertNotIn("!kick", " ".join(out))  # utente normale: niente comandi da op
+        self.assertIn("!help <comando>", out[-1])
         out = await self.say(self.bot, "!help man")
         self.assertEqual(out, ["NOTICE user :!man <cmd>"])
+
+    async def test_help_groups_by_permission(self):
+        out = await self.say(self.bot, "!help", who="op!o@h")
+        self.assertIn("NOTICE op :Per gli operatori: !ban, !kick", out)
+        out = await self.say(self.bot, "!help", who="boss!b@admin.host")
+        self.assertIn("Per gli operatori", " ".join(out))
+        self.assertNotIn("!segreto", " ".join(out))  # hidden resta nascosto anche agli admin nell'elenco
+
+    async def test_help_explains_command_in_detail(self):
+        bot = make_bot("""
+commands:
+  help: {actions: [help]}
+  seen: {description: "Ultima volta visto", usage: "<nick>", details: ["Dettaglio."], examples: ["!seen mario"],
+         actions: [{reply: x}]}
+""")
+        joined(bot)
+        bot.handle_line(":user!u@h PRIVMSG #linux :!help !seen")
+        await bot.drain()
+        self.assertEqual(bot.take(), ["NOTICE user :!seen <nick> — Ultima volta visto", "NOTICE user Dettaglio.",
+                                      "NOTICE user :Esempi: !seen mario"])
 
     async def test_ignore_and_unknown(self):
         bot = make_bot(COMMANDS + "\nbehavior: {ignore: ['*!*@spam.host'], unknown_command_reply: '{nick}: boh'}")

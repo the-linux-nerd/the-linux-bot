@@ -314,6 +314,13 @@ ABOUT_TEXTS = {
     "who_can": "Chi può usarlo: {who}.",
     "not_for_you": "Questo comando non puoi usarlo: è riservato, lo usano {who}.",
     "private_only": "Si usa solo nei canali, non in privato.",
+    "help_anyone": "Comandi: {commands}",
+    "help_voice": "Per chi ha voice: {commands}",
+    "help_halfop": "Per gli halfop: {commands}",
+    "help_op": "Per gli operatori: {commands}",
+    "help_admin": "Per gli admin del bot: {commands}",
+    "help_hint": "Per sapere come si usa un comando: {prefix}help <comando> (es. {prefix}help {example}). "
+                 "Per sapere chi sono e cosa so fare: \"{botnick}: chi sei?\"",
 }
 
 # Argomenti automatici: chiave -> (alias, testo). Compaiono solo se la funzione è attiva.

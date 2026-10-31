@@ -105,6 +105,9 @@ per ognuna, i comandi che l'utente può usare.
   Puoi scriverlo anche: !visto.
 ```
 
+- **`!help`** elenca i comandi che l'utente può usare, divisi per livello (per tutti, per gli
+  operatori, per gli admin); **`!help <comando|argomento>`** dà la spiegazione completa, la stessa
+  di `!info`. "TheLinuxBot: aiuto" o "help" scritto in privato danno la presentazione.
 - **Come si attiva**: con l'azione `explain`, collegata a un comando (`!info [comando|argomento]`)
   e a frasi come "chi sei", "cosa sai fare", "come si usa X", "spiegami X" (vedi `responses`
   nella config d'esempio). "come si usa !tempban?" funziona anche senza citare il bot.
@@ -308,7 +311,7 @@ una mappa. Il canale di default è quello in cui è arrivato il comando.
 | `nick` | `nick: "NuovoNick"` | |
 | `raw` | `raw: "PRIVMSG X :ciao"` | |
 | `delay` | `delay: 2` (secondi) | |
-| `help` | `help` / `help: say` | `help: {method: notice}` |
+| `help` | `help` / `help: say` | `help: {method: notice\|say\|private, topic}`: elenco o spiegazione di un comando |
 | `reload` | `reload` | `reload: {ok: "...", error: "... {error}"}` |
 | `quit` | `quit: "motivo"` | |
 | `explain` | `explain: "{args}"` (vuoto = presentazione) | `explain: {topic, method}` |

@@ -989,32 +989,6 @@ class Bot(AboutMixin, BanMixin):
         if line:
             self.send(sanitize(line))
 
-    def _action_help(self, value: Any, ctx: dict) -> None:
-        method = value.get("method", "notice") if isinstance(value, dict) else (value or "notice")
-        prefix = ctx.get("prefix", "")
-        wanted = (ctx.get("arg1") or "").lstrip(prefix).lower()
-        is_admin = self.is_admin(ctx.get("mask", ""))
-        visible = [c for c in self.config.commands.values()
-                   if c.enabled and not c.hidden
-                   and self.has_permission(ctx.get("mask", ""), c.permission, ctx.get("channel", ""), is_admin)]
-        if wanted:
-            cmd = self.config.find_command(wanted)
-            if cmd is None or cmd not in visible:
-                text = f"Comando sconosciuto: {wanted}"
-            else:
-                text = f"{prefix}{cmd.name} {cmd.usage}".strip()
-                if cmd.description:
-                    text += f" — {cmd.description}"
-                if cmd.aliases:
-                    text += f" (alias: {', '.join(prefix + a for a in cmd.aliases)})"
-        else:
-            names = ", ".join(prefix + c.name for c in sorted(visible, key=lambda c: c.name))
-            text = f"Comandi disponibili: {names}. Usa {prefix}help <comando> per i dettagli."
-        if method == "say":
-            self.say(ctx["_target"], text)
-        else:
-            self.notice(ctx.get("nick") or ctx["_target"], text)
-
     def _action_reload(self, value: Any, ctx: dict) -> None:
         opts = value if isinstance(value, dict) else {}
         target = ctx.get("nick") or ctx["_target"]

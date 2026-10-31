@@ -317,6 +317,15 @@ responses:
     actions:
       - explain: ""
 
+  - name: aiuto
+    match: regex
+    # "TheLinuxBot: aiuto", "TheLinuxBot help!", o "help" scritto in privato al bot
+    patterns: ['^(aiuto|help|aiutami|sos)\W*$']
+    addressed: true
+    cooldown: 10
+    actions:
+      - explain: ""
+
   - name: spiegami
     match: regex
     # "TheLinuxBot: come si usa seen?", "TheLinuxBot, spiegami i ban a tempo"
@@ -411,8 +420,9 @@ commands:
 
   help:
     aliases: [aiuto, comandi]
-    description: "Elenca i comandi o mostra i dettagli di uno"
-    usage: "[comando]"
+    description: "Elenca i comandi che puoi usare, o spiega come si usa un comando"
+    usage: "[comando|argomento]"
+    examples: ["{prefix}help", "{prefix}help seen", "{prefix}help moderazione"]
     actions:
       - help: notice                 # notice (default) oppure say
 

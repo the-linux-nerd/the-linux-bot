@@ -133,18 +133,50 @@ class AboutMixin:
                 return text
         return [self._at("unknown", ctx, topic=topic, topics=", ".join(topics) or "me stesso")]
 
-    def _action_explain(self: "Bot", value: Any, ctx: dict) -> None:
-        opts = value if isinstance(value, dict) else {"topic": value if value is not None else "{args}"}
-        topic = self._r(opts.get("topic", "{args}"), ctx)
-        lines = self.explain_lines(topic, ctx)
-        about = self.config.about
-        method = str(opts.get("method", about.method))
+    def _deliver(self: "Bot", lines: list[str], ctx: dict, method: str, inline_max: int = 0) -> None:
+        """Risposte brevi dove è stata fatta la domanda; lunghe in privato o in notice (con avviso)."""
         nick, target = ctx.get("nick", ""), ctx["_target"]
-        if len(lines) <= about.inline_max_lines or method == "say" or not nick:
+        if method == "say" or not nick or len(lines) <= inline_max:
             for line in lines:
                 self.say(target, line)
             return
         for line in lines:
             (self.notice if method == "notice" else self.say)(nick, line)
-        if is_channel(target):
+        if method == "private" and is_channel(target):
             self.say(target, self._at("redirect", ctx))
+
+    def _action_explain(self: "Bot", value: Any, ctx: dict) -> None:
+        opts = value if isinstance(value, dict) else {"topic": value if value is not None else "{args}"}
+        topic = self._r(opts.get("topic", "{args}"), ctx)
+        about = self.config.about
+        self._deliver(self.explain_lines(topic, ctx), ctx, str(opts.get("method", about.method)),
+                      about.inline_max_lines)
+
+    def help_lines(self: "Bot", ctx: dict) -> list[str]:
+        """Elenco dei comandi che l'utente può usare, divisi per livello di permesso."""
+        prefix = ctx.get("prefix", "")
+        mask, channel = ctx.get("mask", ""), ctx.get("channel", "")
+        is_admin = self.is_admin(mask)
+        groups: dict[str, list[str]] = {}
+        for cmd in sorted(self.config.commands.values(), key=lambda c: c.name):
+            if cmd.enabled and not cmd.hidden and self.has_permission(mask, cmd.permission, channel, is_admin):
+                groups.setdefault(cmd.permission, []).append(prefix + cmd.name)
+        lines = [self._at(f"help_{level}", ctx, commands=", ".join(groups[level]))
+                 for level in ("anyone", "voice", "halfop", "op", "admin") if level in groups]
+        # come esempio, un comando per tutti che abbia una spiegazione estesa
+        usable = [c for c in sorted(self.config.commands.values(), key=lambda c: c.name)
+                  if c.enabled and not c.hidden and c.permission == "anyone" and c.name != "help"]
+        rich = [c for c in usable if c.details or c.examples]
+        example = (rich or usable)[0].name if (rich or usable) else "help"
+        lines.append(self._at("help_hint", ctx, example=example))
+        return lines
+
+    def _action_help(self: "Bot", value: Any, ctx: dict) -> None:
+        """``!help``: elenco dei comandi; ``!help <comando|argomento>``: spiegazione completa."""
+        opts = value if isinstance(value, dict) else {"method": value or "notice"}
+        method = str(opts.get("method", "notice"))
+        topic = self._r(opts.get("topic", "{args}"), ctx).strip()
+        if topic:
+            self._deliver(self.explain_lines(topic, ctx), ctx, method)
+        else:
+            self._deliver(self.help_lines(ctx), ctx, method)
