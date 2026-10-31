@@ -14,8 +14,10 @@ import logging
 import re
 import time
 import urllib.parse
+import unicodedata
 import urllib.request
-from dataclasses import dataclass
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import __version__
@@ -24,6 +26,10 @@ from .config import SearchConfig, SearchProvider
 log = logging.getLogger("linuxbot.search")
 
 SE_API = "https://api.stackexchange.com/2.3"
+YT_API = "https://www.googleapis.com/youtube/v3"
+YT_FEED = "https://www.youtube.com/feeds/videos.xml?channel_id="
+_ATOM = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015",
+         "media": "http://search.yahoo.com/mrss/"}
 
 
 @dataclass
@@ -35,17 +41,23 @@ class Result:
     score: int | None = None
     answers: int | None = None
     accepted: bool = False
+    kind: str = "qa"          # qa | wiki | video
+    extra: dict = field(default_factory=dict)
 
 
-def http_get(url: str, timeout: float) -> Any:
-    """GET di un URL che risponde JSON (anche compresso gzip, come fa sempre Stack Exchange)."""
+def http_get(url: str, timeout: float, raw: bool = False) -> Any:
+    """GET di un URL che risponde JSON (anche compresso gzip, come fa sempre Stack Exchange).
+
+    Con ``raw=True`` restituisce il testo (es. il feed XML di un canale YouTube).
+    """
     req = urllib.request.Request(url, headers={"User-Agent": f"TheLinuxBot/{__version__} (IRC bot)",
                                                "Accept-Encoding": "gzip"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (URL costruiti da noi)
-        raw = resp.read(2 * 1024 * 1024)
-        if resp.headers.get("Content-Encoding") == "gzip" or raw[:2] == b"\x1f\x8b":
-            raw = gzip.decompress(raw)
-    return json.loads(raw.decode("utf-8"))
+        body = resp.read(2 * 1024 * 1024)
+        if resp.headers.get("Content-Encoding") == "gzip" or body[:2] == b"\x1f\x8b":
+            body = gzip.decompress(body)
+    text = body.decode("utf-8")
+    return text if raw else json.loads(text)
 
 
 def _clean(text: str) -> str:
@@ -63,6 +75,8 @@ class Searcher:
         self.backoff_until: dict[str, float] = {}
         self.quota_remaining: int | None = None
         self.requests = 0
+        self.yt_channel_ids: dict[str, str] = {}   # @handle -> UC...
+        self._warned: set[str] = set()
 
     # ------------------------------------------------------------------ provider
 
@@ -99,11 +113,103 @@ class Searcher:
         # [query, [titoli], [descrizioni], [link]]
         if not isinstance(data, list) or len(data) < 4:
             return []
-        return [Result(p.name, p.label, _clean(t), link) for t, link in zip(data[1], data[3])]
+        return [Result(p.name, p.label, _clean(t), link, kind="wiki") for t, link in zip(data[1], data[3])]
+
+    def _yt_channel_id(self, p: SearchProvider, channel: str) -> str:
+        """Risolve un handle (@nome) nell'ID del canale, una volta sola (1 unità di quota)."""
+        if channel.startswith("UC"):
+            return channel
+        if channel not in self.yt_channel_ids:
+            params = {"part": "id", "forHandle": channel, "key": p.api_key}
+            data = self.fetch(f"{YT_API}/channels?{urllib.parse.urlencode(params)}", self.cfg.timeout)
+            self._yt_check(data)
+            items = data.get("items") or []
+            if not items:
+                raise RuntimeError(f"canale YouTube {channel} non trovato")
+            self.yt_channel_ids[channel] = items[0]["id"]
+            log.info("Canale YouTube %s = %s", channel, self.yt_channel_ids[channel])
+        return self.yt_channel_ids[channel]
+
+    @staticmethod
+    def _yt_check(data: Any) -> None:
+        if isinstance(data, dict) and "error" in data:
+            err = data["error"]
+            reason = next((e.get("reason") for e in err.get("errors", []) if e.get("reason")), "")
+            raise RuntimeError(f"YouTube: {reason or err.get('code')}: {err.get('message', '')}".strip())
+
+    @staticmethod
+    def _yt_date(value: str) -> str:
+        m = re.match(r"(\d{4})-(\d{2})-(\d{2})", value or "")
+        return f"{m.group(3)}/{m.group(2)}/{m.group(1)}" if m else ""
+
+    def _youtube_api(self, p: SearchProvider, channel: str, query: str) -> list[Result]:
+        params = {"part": "snippet", "type": "video", "q": query, "channelId": self._yt_channel_id(p, channel),
+                  "maxResults": str(self.cfg.max_results), "order": p.order, "key": p.api_key}
+        data = self.fetch(f"{YT_API}/search?{urllib.parse.urlencode(params)}", self.cfg.timeout)
+        self._yt_check(data)
+        results = []
+        for item in data.get("items", []):
+            vid = (item.get("id") or {}).get("videoId")
+            sn = item.get("snippet") or {}
+            if vid:
+                results.append(Result(p.name, p.label, _clean(sn.get("title", "")), f"https://youtu.be/{vid}",
+                                      kind="video", extra={"channel": _clean(sn.get("channelTitle", "")),
+                                                           "date": self._yt_date(sn.get("publishedAt", ""))}))
+        return results
+
+    @staticmethod
+    def _words(text: str) -> list[str]:
+        text = unicodedata.normalize("NFKD", text.lower())
+        text = "".join(c for c in text if not unicodedata.combining(c))
+        return re.findall(r"[a-z0-9][a-z0-9+#._-]*", text)
+
+    def _youtube_feed(self, p: SearchProvider, channel: str, query: str) -> list[Result]:
+        """Senza chiave: cerca le parole nel feed pubblico del canale (solo gli ultimi 15 video)."""
+        xml = self.fetch(YT_FEED + channel, self.cfg.timeout, raw=True)
+        root = ET.fromstring(xml)
+        wanted = [w for w in self._words(query) if len(w) >= 3] or self._words(query)
+        if not wanted:
+            return []
+        scored = []
+        for pos, entry in enumerate(root.findall("a:entry", _ATOM)):
+            title = entry.findtext("a:title", "", _ATOM)
+            desc = entry.findtext("media:group/media:description", "", _ATOM)
+            vid = entry.findtext("yt:videoId", "", _ATOM)
+            haystack = set(self._words(f"{title} {desc}"))
+            title_words = set(self._words(title))
+            hits = sum(1 for w in wanted if w in haystack)
+            if not vid or hits * 2 < len(wanted):  # almeno metà delle parole
+                continue
+            bonus = sum(1 for w in wanted if w in title_words)
+            scored.append((hits + bonus, -pos, Result(
+                p.name, p.label, _clean(title), f"https://youtu.be/{vid}", kind="video",
+                extra={"channel": _clean(entry.findtext("a:author/a:name", "", _ATOM)),
+                       "date": self._yt_date(entry.findtext("a:published", "", _ATOM))})))
+        scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+        return [r for _, _, r in scored[: self.cfg.max_results]]
+
+    def _youtube(self, p: SearchProvider, query: str) -> list[Result]:
+        per_channel = []
+        for channel in p.channels:
+            if p.api_key:
+                per_channel.append(self._youtube_api(p, channel, query))
+            elif channel.startswith("UC"):
+                per_channel.append(self._youtube_feed(p, channel, query))
+            elif channel not in self._warned:
+                self._warned.add(channel)
+                log.warning("YouTube: per cercare in %s senza api_key serve l'ID del canale (UC...), "
+                            "non l'handle; con una api_key va bene anche l'handle. Lo salto.", channel)
+        # a turno fra i canali
+        merged = []
+        for rank in range(self.cfg.max_results):
+            merged += [r[rank] for r in per_channel if rank < len(r)]
+        return merged[: self.cfg.max_results]
 
     def _search_one(self, p: SearchProvider, query: str) -> list[Result]:
         if p.type == "stackexchange":
             return self._stackexchange(p, query)
+        if p.type == "youtube":
+            return self._youtube(p, query)
         return self._mediawiki(p, query)
 
     # ------------------------------------------------------------------ ricerca

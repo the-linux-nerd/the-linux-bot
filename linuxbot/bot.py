@@ -1104,9 +1104,18 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
             return
         for r in results:
             meta = ""
-            if r.score is not None:
-                meta = render(texts["meta"], {**vars_, "score": r.score, "answers": r.answers or 0,
-                                              "accepted": texts["accepted"] if r.accepted else ""})
+            if r.kind == "video":
+                if r.extra.get("channel") and r.extra.get("date"):
+                    meta = render(texts["video_meta"], {**vars_, **r.extra})
+                elif r.extra.get("channel") or r.extra.get("date"):
+                    meta = f"({r.extra.get('channel') or r.extra.get('date')}) "
+            elif r.score is not None:
+                answers = r.answers or 0
+                meta = render(texts["meta"], {
+                    **vars_, "score": r.score, "answers": answers,
+                    "votes": f"{r.score} {'voto' if abs(r.score) == 1 else 'voti'}",
+                    "replies": f"{answers} {'risposta' if answers == 1 else 'risposte'}",
+                    "accepted": texts["accepted"] if r.accepted else ""})
             self.say(target, render(texts["result"], {**vars_, "label": r.label, "title": r.title,
                                                       "link": r.link, "meta": meta}))
         if failed:

@@ -147,7 +147,7 @@ search:
   enabled: true
   timeout: 8                 # secondi per provider
   cache_minutes: 60          # la stessa domanda non viene ripetuta all'API per un'ora
-  max_results: 3             # risultati mostrati, a turno fra i provider
+  max_results: 4             # risultati mostrati, a turno fra i provider
   only_answered: true        # solo domande con almeno una risposta
   stackexchange_key: ${STACKEXCHANGE_KEY:-}
   providers:
@@ -155,6 +155,21 @@ search:
     - { name: so-it,     type: stackexchange, site: it.stackoverflow, label: "SO-it" }
     - { name: unix,      type: stackexchange, site: unix,             label: "unix.SE" }
     - { name: archwiki,  type: mediawiki, api: "https://wiki.archlinux.org/api.php", label: "ArchWiki" }
+    # Video da canali YouTube tecnici (handle @nome o ID del canale UC...).
+    # Con una chiave YouTube Data API v3 (gratuita, da https://console.cloud.google.com,
+    # abilitando "YouTube Data API v3") cerca fra tutti i video del canale: ogni
+    # ricerca costa 100 delle 10000 unità giornaliere, per ogni canale.
+    # Senza chiave legge il feed pubblico del canale: solo gli ultimi 15 video, e
+    # servono gli ID UC... (l'ID si trova nella pagina "Informazioni" del canale,
+    # "Condividi canale" -> "Copia ID canale").
+    - name: youtube
+      type: youtube
+      label: "YouTube"
+      api_key: ${YOUTUBE_API_KEY:-}
+      order: relevance           # relevance | date (i più recenti)
+      channels:
+        - "@the-linux-nerd"
+        # - "UCxxxxxxxxxxxxxxxxxxxxxx"   # altri canali, anche per ID
     - { name: so,        type: stackexchange, site: stackoverflow,    label: "SO" }
     - { name: askubuntu, type: stackexchange, site: askubuntu,        label: "AskUbuntu" }
   # texts: { result: "[{label}] {title} {meta}{link}" }
@@ -449,6 +464,14 @@ responses:
     actions:
       - search: "{q}"
 
+  - name: cerca-video
+    match: regex
+    # "c'è un video su btrfs?", "TheLinuxBot, hai un video che spiega i permessi?"
+    patterns: ['(c.è|ci sono|hai|avete|esiste) (un |dei |qualche )?video (su|sul|sulla|sui|sugli|per|che spiega(no)?|di) (?P<q>.+?)\??$']
+    cooldown: 20
+    actions:
+      - search: { query: "{q}", providers: [youtube] }
+
   - name: ricerca-rapida
     match: regex
     # "?? rsync escludere cartelle" anche senza citare il bot
@@ -644,7 +667,7 @@ commands:
   # --- ricerca di risposte tecniche --------------------------------------------
   cerca:
     aliases: [so, search, stackoverflow]
-    description: "Cerca risposte su Stack Overflow, unix.SE, Ask Ubuntu e ArchWiki"
+    description: "Cerca risposte su Stack Overflow, unix.SE, Ask Ubuntu, ArchWiki e video YouTube"
     usage: "<domanda>"
     min_args: 1
     cooldown: 15
@@ -654,6 +677,16 @@ commands:
     examples: ["{prefix}cerca rsync escludere una cartella", "?? bash loop over files with spaces"]
     actions:
       - search: "{args}"
+
+  video:
+    aliases: [yt, youtube]
+    description: "Cerca un video sui canali YouTube tecnici configurati"
+    usage: "<argomento>"
+    min_args: 1
+    cooldown: 15
+    examples: ["{prefix}video installare arch linux", "{prefix}yt bash script"]
+    actions:
+      - search: { query: "{args}", providers: [youtube] }
 
   unix:
     aliases: [use]

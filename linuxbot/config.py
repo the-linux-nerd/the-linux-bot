@@ -399,7 +399,8 @@ SE_HOSTS = {  # siti Stack Exchange -> dominio, per i link brevi /q/<id>
 
 SEARCH_TEXTS = {
     "result": "[{label}] {title} {meta}{link}",
-    "meta": "({accepted}{score} voti, {answers} risposte) ",
+    "meta": "({accepted}{votes}, {replies}) ",
+    "video_meta": "({channel}, {date}) ",
     "accepted": "✔ ",
     "none": "{nick}: non ho trovato niente per \"{query}\". Prova a riformulare, magari in inglese.",
     "error": "{nick}: la ricerca non è disponibile in questo momento, riprova più tardi.",
@@ -412,11 +413,14 @@ SEARCH_TEXTS = {
 @dataclass
 class SearchProvider:
     name: str
-    type: str                 # stackexchange | mediawiki
+    type: str                 # stackexchange | mediawiki | youtube
     label: str = ""
     site: str = ""            # stackexchange: es. stackoverflow, unix, askubuntu, it.stackoverflow
     api: str = ""             # mediawiki: es. https://wiki.archlinux.org/api.php
     host: str = ""
+    channels: list[str] = field(default_factory=list)  # youtube: handle (@nome) o ID (UC...)
+    api_key: str = ""         # youtube: chiave YouTube Data API v3 (senza: solo gli ultimi 15 video, via feed)
+    order: str = "relevance"  # youtube: relevance | date
 
 
 @dataclass
@@ -451,10 +455,12 @@ def _parse_search(data: dict) -> SearchConfig:
         where = f"search.providers[{i}]"
         if not isinstance(p, dict):
             raise ConfigError(f"{where}: deve essere una mappa")
-        _check_keys(p, {"name", "type", "label", "site", "api"}, where)
+        _check_keys(p, {"name", "type", "label", "site", "api", "channels", "api_key", "order"}, where)
         prov = SearchProvider(name=str(p.get("name") or p.get("site") or f"p{i}"), type=str(p.get("type", "")),
                               label=str(p.get("label") or p.get("name") or p.get("site") or ""),
-                              site=str(p.get("site", "")), api=str(p.get("api", "")))
+                              site=str(p.get("site", "")), api=str(p.get("api", "")),
+                              channels=[str(c).strip() for c in _as_list(p.get("channels"))],
+                              api_key=str(p.get("api_key") or ""), order=str(p.get("order", "relevance")).lower())
         if prov.type == "stackexchange":
             if not prov.site:
                 raise ConfigError(f"{where}: per stackexchange serve 'site' (es. stackoverflow, unix)")
@@ -462,8 +468,17 @@ def _parse_search(data: dict) -> SearchConfig:
         elif prov.type == "mediawiki":
             if not prov.api.startswith(("https://", "http://")):
                 raise ConfigError(f"{where}: per mediawiki serve 'api' (URL di api.php)")
+        elif prov.type == "youtube":
+            if not prov.channels:
+                raise ConfigError(f"{where}: per youtube serve 'channels' (es. ['@the-linux-nerd'])")
+            for ch in prov.channels:
+                if not re.fullmatch(r"@[\w.\-]{3,30}|UC[\w\-]{22}", ch):
+                    raise ConfigError(f"{where}.channels: '{ch}' non è un handle (@nome) né un ID di canale (UC...)")
+            if prov.order not in ("relevance", "date"):
+                raise ConfigError(f"{where}.order: deve essere 'relevance' o 'date'")
+            prov.label = str(p.get("label") or "YouTube")
         else:
-            raise ConfigError(f"{where}.type: deve essere 'stackexchange' o 'mediawiki'")
+            raise ConfigError(f"{where}.type: deve essere 'stackexchange', 'mediawiki' o 'youtube'")
         if prov.name in names:
             raise ConfigError(f"{where}: nome '{prov.name}' duplicato")
         names.add(prov.name)

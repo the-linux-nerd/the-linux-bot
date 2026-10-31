@@ -26,8 +26,9 @@ connessione, autenticazione, saluti, risposte automatiche, comandi e azioni.
   presentazione, funzioni attive ricavate dalla configurazione, uso dei comandi con esempi.
 - **Link rapidi** per un canale tecnico: `!archwiki`, `!pkg`, `!tldr`, `!explainshell`, `!cve`,
   `!rfc`, `!xkcd`, `!kernel`, `!distro`, `!web`, `!man`.
-- **Ricerca di risposte tecniche** su Stack Overflow (anche in italiano), unix.SE, Ask Ubuntu e
-  ArchWiki: `!cerca`, `?? domanda`, "TheLinuxBot: come faccio a ...?".
+- **Ricerca di risposte tecniche** su Stack Overflow (anche in italiano), unix.SE, Ask Ubuntu,
+  ArchWiki e canali YouTube tecnici: `!cerca`, `!video`, `?? domanda`,
+  "TheLinuxBot: come faccio a ...?", "c'è un video su btrfs?".
 - **Karma** del canale: `nick++`, `nick--`, "grazie nick", `!karma`, `!top`; punteggi
   permanenti, regole anti-abuso, azzeramento al ban.
 - **Attività programmate**: azioni a orari fissi o a intervalli, ad esempio la top ten del
@@ -237,7 +238,7 @@ un esempio di tutto. In sintesi:
 | `auth`       | `sasl`, `nickserv`, `oper`, `user_modes` |
 | `self_op`    | come il bot ottiene e mantiene l'op nei canali |
 | `about`      | come il bot si presenta e spiega comandi e funzioni |
-| `search`     | ricerca su Stack Exchange e wiki MediaWiki |
+| `search`     | ricerca su Stack Exchange, wiki MediaWiki e canali YouTube |
 | `karma`      | karma del canale e relative regole |
 | `schedules`  | attività a orari fissi o a intervalli |
 | `channels`   | canali (nome o `{name, key, owners}`) |
@@ -395,6 +396,38 @@ Esempio di formato (titoli e numeri sono illustrativi):
   Il bot deve poter raggiungere `api.stackexchange.com` e le wiki configurate.
 - Le ricerche funzionano meglio in inglese: le domande in italiano trovano soprattutto
   risultati su `it.stackoverflow`.
+
+### Video da canali YouTube
+
+Un provider `type: youtube` cerca fra i video dei canali indicati (handle `@nome` o ID `UC...`):
+
+```yaml
+search:
+  providers:
+    - name: youtube
+      type: youtube
+      label: "YouTube"
+      api_key: ${YOUTUBE_API_KEY:-}
+      order: relevance            # o date, per i più recenti
+      channels: ["@the-linux-nerd", "UCxxxxxxxxxxxxxxxxxxxxxx"]
+```
+
+```
+<anna> c'è un video su btrfs?
+<TheLinuxBot> [YouTube] titolo del video (The Linux Nerd, 01/10/2026) https://youtu.be/...
+```
+
+- **Con `api_key`** (YouTube Data API v3, gratuita: si crea su https://console.cloud.google.com
+  abilitando "YouTube Data API v3") il bot cerca fra **tutti** i video del canale. La quota è di
+  10000 unità al giorno e ogni ricerca costa 100 unità per canale: circa 100 ricerche al giorno
+  con un canale, 50 con due. L'handle viene convertito nell'ID una volta sola.
+- **Senza chiave** il bot legge il feed pubblico del canale, che contiene **solo gli ultimi 15
+  video**, e cerca le parole della domanda in titoli e descrizioni (senza badare a maiuscole e
+  accenti). In questo modo servono gli ID `UC...`: l'handle si può convertire solo con la chiave.
+  Un canale indicato per handle senza chiave viene saltato, con un avviso nel log.
+- Nella config d'esempio YouTube fa parte di `!cerca`, e c'è `!video` (`!yt`) per cercare solo
+  nei video, più la frase "c'è un video su ...?". Il bot deve poter raggiungere
+  `www.googleapis.com` (con la chiave) o `www.youtube.com` (senza).
 
 ## Karma
 
