@@ -25,6 +25,7 @@ class RecordingBot(Bot):
         self.sent = []
 
     def send(self, line, priority=False):
+        self._observe_outgoing(line)
         self.sent.append(line)
 
     def take(self):

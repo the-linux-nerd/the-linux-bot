@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import re
 import sqlite3
 import time
@@ -98,10 +99,24 @@ class Memo:
     ts: float
 
 
+def _timed(method):
+    """Misura la durata delle operazioni sul database (per le statistiche e gli avvisi di lentezza)."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            if self.on_timing is not None:
+                self.on_timing(method.__name__, time.perf_counter() - started)
+    return wrapper
+
+
 class Memory:
     def __init__(self, path: str | Path, clock=time.time):
         self.path = str(path)
         self.clock = clock
+        self.on_timing = None
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path)
@@ -115,6 +130,7 @@ class Memory:
 
     # ------------------------------------------------------------------ seen
 
+    @_timed
     def record(self, nick: str, channel: str, event: str, detail: str = "", mask: str = "") -> None:
         """Registra l'ultima attività di ``nick`` in ``channel``. ``event``: join, part, quit, kick, nick, message."""
         key, chan = irc_lower(nick), irc_lower(channel)
@@ -131,12 +147,14 @@ class Memory:
         )
         self.db.commit()
 
+    @_timed
     def last_seen(self, nick: str) -> SeenEntry | None:
         row = self.db.execute(
             "SELECT nick, channel, mask, event, detail, ts, joins FROM seen WHERE nick_key = ? "
             "ORDER BY ts DESC LIMIT 1", (irc_lower(nick),)).fetchone()
         return SeenEntry(*row) if row else None
 
+    @_timed
     def recent(self, seconds: float, channel: str | None = None, exclude: set[str] = frozenset()) -> list[SeenEntry]:
         """Utenti visti negli ultimi ``seconds`` secondi, dal più recente; un'occorrenza per nick."""
         cutoff = self.clock() - seconds
@@ -149,6 +167,7 @@ class Memory:
         rows = [SeenEntry(*r) for r in self.db.execute(sql, params)]
         return [r for r in rows if irc_lower(r.nick) not in exclude]
 
+    @_timed
     def prune(self, retention_days: float) -> None:
         cutoff = self.clock() - retention_days * 86400
         self.db.execute("DELETE FROM seen WHERE ts < ?", (cutoff,))
@@ -158,6 +177,7 @@ class Memory:
 
     # ------------------------------------------------------------------ memo
 
+    @_timed
     def add_memo(self, sender: str, recipient: str, text: str, channel: str = "") -> int:
         cur = self.db.execute(
             "INSERT INTO memos (recipient_key, recipient, sender, channel, text, ts) VALUES (?, ?, ?, ?, ?, ?)",
@@ -165,6 +185,7 @@ class Memory:
         self.db.commit()
         return int(cur.lastrowid)
 
+    @_timed
     def pending_count(self, recipient: str, sender: str | None = None) -> int:
         sql = "SELECT COUNT(*) FROM memos WHERE recipient_key = ? AND delivered_ts IS NULL"
         params = [irc_lower(recipient)]
@@ -173,6 +194,7 @@ class Memory:
             params.append(sender)
         return int(self.db.execute(sql, params).fetchone()[0])
 
+    @_timed
     def pending(self, recipient: str, expire_days: float = 0) -> list[Memo]:
         sql = ("SELECT id, recipient, sender, channel, text, ts FROM memos "
                "WHERE recipient_key = ? AND delivered_ts IS NULL")
@@ -182,6 +204,7 @@ class Memory:
             params.append(self.clock() - expire_days * 86400)
         return [Memo(*r) for r in self.db.execute(sql + " ORDER BY ts", params)]
 
+    @_timed
     def mark_delivered(self, memos: list[Memo]) -> None:
         now = self.clock()
         self.db.executemany("UPDATE memos SET delivered_ts = ? WHERE id = ?", [(now, m.id) for m in memos])
@@ -190,6 +213,7 @@ class Memory:
 
     # ------------------------------------------------------------------ ban
 
+    @_timed
     def add_ban(self, channel: str, mask: str, nick: str = "", setter: str = "", reason: str = "",
                 expires: float | None = None, manual: bool = False, ts: float | None = None) -> Ban:
         """Registra un ban attivo; se esiste già per lo stesso canale e maschera lo aggiorna."""
@@ -210,10 +234,12 @@ class Memory:
         self.db.commit()
         return self.get_ban(int(cur.lastrowid))  # type: ignore[return-value]
 
+    @_timed
     def get_ban(self, ban_id: int) -> Ban | None:
         row = self.db.execute(f"SELECT {_BAN_COLS} FROM bans WHERE id = ?", (ban_id,)).fetchone()
         return Ban(*row) if row else None
 
+    @_timed
     def find_bans(self, channel: str | None = None, mask: str | None = None, nick: str | None = None,
                   active: bool = True) -> list[Ban]:
         sql = f"SELECT {_BAN_COLS} FROM bans WHERE 1=1"
@@ -232,11 +258,13 @@ class Memory:
         sql += " ORDER BY ts DESC" if not active else " ORDER BY ts"
         return [Ban(*r) for r in self.db.execute(sql, params)]
 
+    @_timed
     def expired_bans(self) -> list[Ban]:
         rows = self.db.execute(f"SELECT {_BAN_COLS} FROM bans WHERE removed_ts IS NULL AND expires IS NOT NULL "
                                "AND expires <= ? ORDER BY expires", (self.clock(),))
         return [Ban(*r) for r in rows]
 
+    @_timed
     def remove_ban(self, ban_id: int, by: str = "") -> None:
         self.db.execute("UPDATE bans SET removed_ts = ?, removed_by = ? WHERE id = ? AND removed_ts IS NULL",
                         (self.clock(), by, ban_id))

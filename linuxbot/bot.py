@@ -15,6 +15,8 @@ from typing import Any, Callable
 
 from . import __version__
 from .bans import BanMixin
+from .chatlog import ChatLog
+from .stats import Stats
 from .config import Config, CommandConfig, ConfigError, ResponseConfig, load_config
 from .memory import Memory, format_ts, time_ago
 from .irc import (
@@ -23,7 +25,15 @@ from .irc import (
 )
 from .templates import args_variables, pick, render
 
-log = logging.getLogger("linuxbot")
+log = logging.getLogger("linuxbot.core")
+log_conn = logging.getLogger("linuxbot.connection")
+log_irc = logging.getLogger("linuxbot.irc")  # traffico grezzo (DEBUG)
+log_auth = logging.getLogger("linuxbot.auth")
+log_chan = logging.getLogger("linuxbot.channels")
+log_cmd = logging.getLogger("linuxbot.commands")
+log_op = logging.getLogger("linuxbot.op")
+log_mem = logging.getLogger("linuxbot.memory")
+log_cfg = logging.getLogger("linuxbot.config")
 
 PING_INTERVAL = 180.0
 
@@ -41,6 +51,10 @@ class Bot(BanMixin):
         self.config = config
         self.clock = clock
         self.wallclock = wallclock
+        self.stats = Stats(clock)
+        self.reload_hooks: list[Callable[[Config], None]] = []  # es. riconfigurazione dei log
+        self.chatlog: ChatLog | None = None
+        self._open_chatlog()
         self.memory: Memory | None = None
         self._banlist_buffer: dict = {}
         self._op_tasks: dict[str, asyncio.Task] = {}
@@ -73,10 +87,11 @@ class Bot(BanMixin):
                 await self._session()
                 delay = self.config.behavior.reconnect_delay
             except (OSError, asyncio.IncompleteReadError, ssl.SSLError, ConnectionError) as exc:
-                log.error("Connessione persa: %s", exc)
+                log_conn.error("Connessione persa: %s", exc)
+                self.stats.disconnected(str(exc) or exc.__class__.__name__)
             if self._quitting:
                 break
-            log.info("Riconnessione fra %.0f secondi", delay)
+            log_conn.info("Riconnessione fra %.0f secondi", delay)
             await asyncio.sleep(delay)
             delay = min(delay * 2, self.config.behavior.reconnect_max_delay)
 
@@ -88,11 +103,13 @@ class Bot(BanMixin):
             if not srv.tls_verify:
                 context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
-        log.info("Connessione a %s:%d (TLS: %s)", srv.host, srv.port, "sì" if srv.tls else "no")
+        log_conn.info("Connessione a %s:%d (TLS: %s)", srv.host, srv.port, "sì" if srv.tls else "no")
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(srv.host, srv.port, ssl=context), timeout=30
         )
         self._reset_state()
+        self.stats.connected()
+        log_conn.info("Connesso a %s:%d", srv.host, srv.port)
         self._writer = writer
         self._queue = asyncio.Queue()
         sender = asyncio.create_task(self._sender(writer))
@@ -125,12 +142,17 @@ class Bot(BanMixin):
             if not raw:
                 raise ConnectionError("connessione chiusa dal server")
             pinged = False
+            self.stats.lines_in += 1
+            self.stats.bytes_in += len(raw)
             line = self._decode(raw).rstrip("\r\n")
             if line:
+                started = time.perf_counter()
                 try:
                     self.handle_line(line)
                 except Exception:  # un bug in un handler non deve far cadere il bot
                     log.exception("Errore gestendo la riga: %s", line)
+                self._timed(self.stats.line_time, time.perf_counter() - started, line.split(" :", 1)[0][:60],
+                            "Riga elaborata lentamente")
 
     def _decode(self, raw: bytes) -> str:
         try:
@@ -150,7 +172,10 @@ class Bot(BanMixin):
             tokens = min(float(beh.flood_burst), tokens + (now - last) / max(beh.flood_rate, 0.01))
             last = now
             if tokens < 1:
-                await asyncio.sleep((1 - tokens) * beh.flood_rate)
+                wait = (1 - tokens) * beh.flood_rate
+                self.stats.flood_delayed += 1
+                self.stats.flood_wait += wait
+                await asyncio.sleep(wait)
                 tokens = 1
                 last = self.clock()
             tokens -= 1
@@ -158,17 +183,24 @@ class Bot(BanMixin):
             await writer.drain()
 
     def _write(self, writer: asyncio.StreamWriter, line: str) -> None:
-        log.debug(">> %s", _redact(line))
-        writer.write((line + "\r\n").encode(self.config.server.encoding, errors="replace"))
+        if log_irc.isEnabledFor(logging.DEBUG):
+            log_irc.debug(">> %s", _redact(line))
+        data = (line + "\r\n").encode(self.config.server.encoding, errors="replace")
+        self.stats.lines_out += 1
+        self.stats.bytes_out += len(data)
+        writer.write(data)
 
     def send(self, line: str, priority: bool = False) -> None:
         """Accoda una riga da inviare. Le righe prioritarie (PONG, registrazione) saltano la coda."""
+        self._observe_outgoing(line)
         if priority and self._writer is not None:
             self._write(self._writer, line)
         elif self._queue is not None:
             self._queue.put_nowait(line)
+            if self._queue.qsize() > self.stats.queue_max:
+                self.stats.queue_max = self._queue.qsize()
         else:
-            log.warning("Non connesso, scarto: %s", _redact(line))
+            log_conn.warning("Non connesso, scarto: %s", _redact(line))
 
     def _reset_state(self) -> None:
         self.nick = self.config.identity.nick
@@ -210,12 +242,12 @@ class Bot(BanMixin):
             if "sasl" in names and self._sasl_in_progress:
                 self.send("CAP REQ :sasl", priority=True)
             else:
-                log.error("Il server non supporta SASL")
+                log_auth.error("Il server non supporta SASL")
                 self._end_cap()
         elif sub == "ACK" and "sasl" in caps:
             self.send("AUTHENTICATE PLAIN", priority=True)
         elif sub == "NAK":
-            log.error("Il server ha rifiutato la capability SASL")
+            log_auth.error("Il server ha rifiutato la capability SASL")
             self._end_cap()
 
     def _on_authenticate(self, msg: Message) -> None:
@@ -239,7 +271,7 @@ class Bot(BanMixin):
             return
         self.registered = True
         auth = self.config.auth
-        log.info("Registrato come %s su %s", self.nick, self.server_name)
+        log_conn.info("Registrato come %s su %s", self.nick, self.server_name)
         if auth.oper.enabled:
             self.send(build_line("OPER", auth.oper.name, auth.oper.password), priority=True)
         if auth.user_modes:
@@ -260,11 +292,13 @@ class Bot(BanMixin):
     async def _join_channels(self, wait: float = 0.0) -> None:
         if self._identified is not None:
             # Entra solo dopo la conferma di NickServ: così ChanServ riconosce il bot e gli dà l'op.
-            try:
-                await asyncio.wait_for(self._identified.wait(), timeout=wait)
-            except asyncio.TimeoutError:
-                log.warning("Nessuna conferma da %s dopo %.0f secondi: entro comunque nei canali",
-                            self.config.auth.nickserv.service, wait)
+            # Se è già arrivata (o è un nuovo giro di join, es. dopo un reload) non aspetta.
+            if not self._identified.is_set() and wait > 0:
+                try:
+                    await asyncio.wait_for(self._identified.wait(), timeout=wait)
+                except asyncio.TimeoutError:
+                    log_auth.warning("Nessuna conferma da %s dopo %.0f secondi: entro comunque nei canali",
+                                     self.config.auth.nickserv.service, wait)
         elif wait:
             await asyncio.sleep(wait)
         for ch in self.config.channels:
@@ -274,7 +308,8 @@ class Bot(BanMixin):
     # ------------------------------------------------------------------ dispatch
 
     def handle_line(self, line: str) -> None:
-        log.debug("<< %s", _redact(line))
+        if log_irc.isEnabledFor(logging.DEBUG):
+            log_irc.debug("<< %s", _redact(line))
         msg = Message.parse(line)
         handler = getattr(self, f"_on_{msg.command.lower()}", None)
         if msg.command.isdigit():
@@ -286,7 +321,7 @@ class Bot(BanMixin):
         self.send(build_line("PONG", msg.last), priority=True)
 
     def _on_error(self, msg: Message) -> None:
-        log.error("Errore dal server: %s", msg.last)
+        log_conn.error("Errore dal server: %s", msg.last)
 
     def _on_numeric(self, msg: Message) -> None:
         code = msg.command
@@ -306,22 +341,22 @@ class Bot(BanMixin):
             self._on_registered()
         elif code in ("432", "433", "436", "437") and not self.registered:
             new = self._next_nick()
-            log.warning("Nick %s non disponibile, provo %s", self.nick, new)
+            log_conn.warning("Nick %s non disponibile, provo %s", self.nick, new)
             self.nick = new
             self.send(build_line("NICK", new), priority=True)
         elif code == "381":
             self.is_oper = True
-            log.info("Ora sono IRC operator")
+            log_auth.info("Ora sono IRC operator")
         elif code in ("464", "491"):
-            log.error("OPER fallito: %s", msg.last)
+            log_auth.error("OPER fallito: %s", msg.last)
         elif code in ("900", "903"):
             if code == "900":  # RPL_LOGGEDIN: identificato (SASL o NickServ)
                 self._set_identified()
             if code == "903":
-                log.info("Autenticazione SASL riuscita")
+                log_auth.info("Autenticazione SASL riuscita")
                 self._end_cap()
         elif code in ("902", "904", "905", "906", "908"):
-            log.error("Autenticazione SASL fallita: %s", msg.last)
+            log_auth.error("Autenticazione SASL fallita: %s", msg.last)
             self._end_cap()
         elif code == "353" and len(msg.params) >= 4:  # NAMES
             chan = self.channels.get(irc_lower(msg.params[2]))
@@ -344,7 +379,7 @@ class Bot(BanMixin):
         elif code == "368" and len(msg.params) > 1:
             self._ban_list_end(msg.params[1])
         elif code in ("471", "473", "474", "475"):
-            log.error("Impossibile entrare in %s: %s", msg.params[1] if len(msg.params) > 1 else "?", msg.last)
+            log_chan.error("Impossibile entrare in %s: %s", msg.params[1] if len(msg.params) > 1 else "?", msg.last)
 
     def _is_me(self, nick: str) -> bool:
         return irc_lower(nick) == irc_lower(self.nick)
@@ -360,9 +395,11 @@ class Bot(BanMixin):
         key = irc_lower(channel)
         self._remember(msg)
         ctx = self._base_context(msg, channel)
+        who = f" ({msg.prefix.user}@{msg.prefix.host})" if msg.prefix and msg.prefix.user else ""
+        self._chat(channel, f"--> {msg.nick}{who} è entrato in {channel}")
         if self._is_me(msg.nick):
             self.channels[key] = Channel(channel)
-            log.info("Entrato in %s", channel)
+            log_chan.info("Entrato in %s", channel)
             self._ban_sync_start(channel)
             self.run_event("self_join", ctx)
             self._request_op(channel)
@@ -380,6 +417,8 @@ class Bot(BanMixin):
 
     def _on_part(self, msg: Message) -> None:
         channel = msg.params[0] if msg.params else ""
+        reason = msg.params[1] if len(msg.params) > 1 else ""
+        self._chat(channel, f"<-- {msg.nick} è uscito da {channel}" + (f" ({reason})" if reason else ""))
         if self._is_me(msg.nick):
             self.channels.pop(irc_lower(channel), None)
             return
@@ -395,9 +434,10 @@ class Bot(BanMixin):
         channel, victim = msg.params[0], msg.params[1]
         ctx = self._base_context(msg, channel)
         ctx.update(victim=victim, kicker=msg.nick, reason=msg.params[2] if len(msg.params) > 2 else "")
+        self._chat(channel, f"<-- {victim} è stato espulso da {msg.nick}" + (f" ({ctx['reason']})" if ctx["reason"] else ""))
         if self._is_me(victim):
             self.channels.pop(irc_lower(channel), None)
-            log.warning("Espulso da %s da %s: %s", channel, msg.nick, ctx["reason"])
+            log_chan.warning("Espulso da %s da %s: %s", channel, msg.nick, ctx["reason"])
             self.run_event("self_kick", ctx)
             if self.config.behavior.rejoin_on_kick:
                 self._spawn(self._rejoin(channel))
@@ -418,6 +458,7 @@ class Bot(BanMixin):
         for chan in self.channels.values():
             if chan.users.pop(nick, None) is not None:
                 self._track(msg.nick, chan.name, "quit", msg.last, msg.prefix.mask if msg.prefix else "")
+                self._chat(chan.name, f"<-- {msg.nick} si è disconnesso" + (f" ({msg.last})" if msg.last else ""))
         self.hosts.pop(nick, None)
         ctx = self._base_context(msg)
         ctx["reason"] = msg.last
@@ -430,6 +471,7 @@ class Bot(BanMixin):
         for chan in self.channels.values():
             if old in chan.users:
                 chan.users[irc_lower(new)] = chan.users.pop(old)
+                self._chat(chan.name, f"--- {msg.nick} ora si chiama {new}")
                 if not self._is_me(new):
                     self._track(msg.nick, chan.name, "nick", new)
                     self._track(new, chan.name, "nick_from", msg.nick)
@@ -445,6 +487,7 @@ class Bot(BanMixin):
             chan.topic = msg.last
         ctx = self._base_context(msg, msg.params[0])
         ctx["topic"] = msg.last
+        self._chat(msg.params[0], f"--- {msg.nick} ha cambiato il topic: {msg.last}")
         self.run_event("topic", ctx)
 
     def _on_invite(self, msg: Message) -> None:
@@ -457,6 +500,7 @@ class Bot(BanMixin):
         chan = self.channels.get(irc_lower(msg.params[0]))
         if not chan:
             return
+        self._chat(chan.name, f"--- {msg.nick or '?'} imposta il modo {' '.join(msg.params[1:])}")
         args = msg.params[2:]
         adding = True
         for ch in msg.params[1]:
@@ -482,24 +526,26 @@ class Bot(BanMixin):
         if not msg.nick:
             return
         text = strip_formatting(msg.last)
+        if msg.params and is_channel(msg.params[0]):
+            self._chat(msg.params[0], f"-{msg.nick}- {text}")
         ns = self.config.auth.nickserv
         if irc_lower(msg.nick) == irc_lower(ns.service):
-            log.info("%s: %s", msg.nick, text)
+            log_auth.info("%s: %s", msg.nick, text)
             if re.search(ns.success_pattern, text):
                 self._set_identified()
             elif re.search(ns.failure_pattern, text):
-                log.error("Identificazione con %s fallita: %s", ns.service, text)
+                log_auth.error("Identificazione con %s fallita: %s", ns.service, text)
                 if self._identified is not None:
                     self._identified.set()  # entra comunque, ma senza op automatico
         elif irc_lower(msg.nick) == irc_lower(self.config.self_op.service):
-            log.info("%s: %s", msg.nick, text)
+            log_op.info("%s: %s", msg.nick, text)
 
     def _set_identified(self) -> None:
         first = self._identified is None or not self._identified.is_set()
         if self._identified is not None:
             self._identified.set()
         if first:
-            log.info("Identificato con i services")
+            log_auth.info("Identificato con i services")
             self.run_event("identified", self._base_context())
 
     def _on_privmsg(self, msg: Message) -> None:
@@ -507,6 +553,12 @@ class Bot(BanMixin):
             return
         self._remember(msg)
         target, text = msg.params[0], msg.last
+        if self.chatlog is not None:
+            where = target if is_channel(target) else ""
+            if text.startswith("\x01ACTION "):
+                self._chat(where, f"* {msg.nick} {strip_formatting(text[8:].rstrip(chr(1)))}")
+            elif not text.startswith("\x01"):
+                self._chat(where, f"<{msg.nick}> {strip_formatting(text)}")
         if text.startswith("\x01"):
             self._on_ctcp(msg, text.strip("\x01"))
             return
@@ -606,8 +658,11 @@ class Bot(BanMixin):
             if beh.cooldown_reply:
                 self.notice(ctx["nick"], render(beh.cooldown_reply, ctx))
             return
-        log.info("Comando %s da %s in %s", cmd.name, ctx["nick"], ctx["channel"] or "privato")
+        log_cmd.info("Comando %s da %s in %s", cmd.name, ctx["nick"], ctx["channel"] or "privato")
+        self.stats.commands[cmd.name] += 1
+        started = time.perf_counter()
         self._run_reply_and_actions(cmd, ctx)
+        self.stats.command_time.add(time.perf_counter() - started, ctx["command"])
 
     def _run_reply_and_actions(self, item: CommandConfig | ResponseConfig, ctx: dict) -> None:
         text = pick(item.reply)
@@ -649,7 +704,9 @@ class Bot(BanMixin):
             for i, group in enumerate(match.groups(), start=1):
                 rctx[f"group{i}"] = group or ""
             rctx.update({k: v or "" for k, v in match.groupdict().items()})
-            log.info("Risposta '%s' per %s in %s", resp.name, ctx["nick"], ctx["channel"] or "privato")
+            log_cmd.info("Risposta '%s' per %s in %s", resp.name, ctx["nick"], ctx["channel"] or "privato")
+            self.stats.responses[resp.name] += 1
+            rctx["_source"] = f"risposta {resp.name}"
             self._run_reply_and_actions(resp, rctx)
             fired = True
             if resp.stop:
@@ -798,15 +855,27 @@ class Bot(BanMixin):
         self._spawn(self.execute_actions(actions, ctx))
 
     async def execute_actions(self, actions: list[dict], ctx: dict) -> None:
+        source = ctx.get("command") or ctx.get("_source", "")
         for action in actions:
             name, value = next(iter(action.items()))
+            started = time.perf_counter()
             try:
                 if name == "delay":
                     await asyncio.sleep(float(value))
-                else:
-                    getattr(self, f"_action_{name}")(value, ctx)
+                    continue
+                getattr(self, f"_action_{name}")(value, ctx)
             except Exception:
-                log.exception("Errore eseguendo l'azione %s", name)
+                log_cmd.exception("Errore eseguendo l'azione %s%s", name, f" ({source})" if source else "")
+            self._timed(self.stats.action_time, time.perf_counter() - started, f"{name} {source}".strip(),
+                        "Azione lenta")
+
+    def _timed(self, timing, seconds: float, name: str, message: str) -> None:
+        """Registra un tempo nelle statistiche e avvisa se supera la soglia configurata."""
+        threshold = self.config.logging.slow_threshold
+        slow = threshold > 0 and seconds > threshold
+        timing.add(seconds, name, slow)
+        if slow:
+            log.warning("%s: %s (%.0f ms, soglia %.0f ms)", message, name, seconds * 1000, threshold * 1000)
 
     # Ogni azione accetta una stringa (forma breve) oppure una mappa con i dettagli.
 
@@ -848,10 +917,10 @@ class Bot(BanMixin):
         else:
             nick, reason = self._r(value or "{target}", ctx), ""
         if not channel or not nick:
-            log.warning("kick: canale o nick mancante")
+            log_cmd.warning("kick: canale o nick mancante")
             return
         if self._nick_immune(nick, channel):
-            log.warning("Rifiuto di espellere %s da %s: è immune", nick, channel)
+            log_cmd.warning("Rifiuto di espellere %s da %s: è immune", nick, channel)
             return
         self.send(build_line("KICK", channel, nick, reason) if reason else build_line("KICK", channel, nick))
 
@@ -950,7 +1019,7 @@ class Bot(BanMixin):
         try:
             self.reload()
         except ConfigError as exc:
-            log.error("Ricaricamento fallito: %s", exc)
+            log_cfg.error("Ricaricamento fallito: %s", exc)
             self.notice(target, render(opts.get("error", "Errore nella configurazione: {error}"),
                                        {**ctx, "error": str(exc)}))
             return
@@ -960,6 +1029,58 @@ class Bot(BanMixin):
         self._quitting = True
         reason = self._r(value, ctx) or "Arrivederci!"
         self.send(build_line("QUIT", reason))
+
+    # ------------------------------------------------------------------ log delle chat e statistiche
+
+    def _open_chatlog(self) -> None:
+        cfg = self.config.logging.chatlog
+        if self.chatlog is not None:
+            self.chatlog.close()
+            self.chatlog = None
+        if cfg.enabled:
+            self.chatlog = ChatLog(cfg, self.config.resolve(cfg.directory), clock=lambda: self.wallclock())
+
+    def _chat(self, channel: str, text: str) -> None:
+        if self.chatlog is not None:
+            self.chatlog.write(channel, text)
+
+    def _observe_outgoing(self, line: str) -> None:
+        """Scrive nel log delle chat anche ciò che dice il bot."""
+        if self.chatlog is None or not line.startswith(("PRIVMSG ", "NOTICE ")):
+            return
+        msg = Message.parse(line)
+        if len(msg.params) < 2:
+            return
+        target, text = msg.params[0], msg.last
+        if is_channel(target):
+            if text.startswith("\x01ACTION "):
+                self._chat(target, f"* {self.nick} {text[8:].rstrip(chr(1))}")
+            elif not text.startswith("\x01"):
+                fmt = "<{}> {}" if msg.command == "PRIVMSG" else "-{}- {}"
+                self._chat(target, fmt.format(self.nick, text))
+        elif not text.startswith("\x01"):
+            self._chat("", f"<{self.nick}> -> {target}: {text}")
+
+    def _db_timing(self, operation: str, seconds: float) -> None:
+        threshold = self.config.logging.slow_db_threshold
+        slow = threshold > 0 and seconds > threshold
+        self.stats.db_time.add(seconds, operation, slow)
+        if slow:
+            log_mem.warning("Operazione lenta sul database: %s (%.0f ms, soglia %.0f ms)",
+                            operation, seconds * 1000, threshold * 1000)
+
+    def _action_stats(self, value: Any, ctx: dict) -> None:
+        opts = value if isinstance(value, dict) else {"method": value or "notice"}
+        section = self._r(opts.get("section", "{arg1}"), ctx).strip().lower()
+        queue_now = self._queue.qsize() if self._queue is not None else 0
+        lines = self.stats.report(self.server_name, queue_now, section)
+        if not lines:
+            lines = ["Sezioni: generale, comandi, flood, db, errori."]
+        for line in lines:
+            if opts.get("method") == "say":
+                self.say(ctx["_target"], line)
+            else:
+                self.notice(ctx.get("nick") or ctx["_target"], line)
 
     # ------------------------------------------------------------------ op per il bot
 
@@ -994,21 +1115,21 @@ class Bot(BanMixin):
                 return  # uscito dal canale
             if self.has_op(channel):
                 return
-            log.info("Chiedo l'op in %s (tentativo %d di %d)", channel, attempt + 1, cfg.max_retries + 1)
+            log_op.info("Chiedo l'op in %s (tentativo %d di %d)", channel, attempt + 1, cfg.max_retries + 1)
             self._send_op_request(channel)
             await asyncio.sleep(cfg.retry)
         if irc_lower(channel) in self.channels and not self.has_op(channel):
-            log.error("Non ho ottenuto l'op in %s: controlla che il bot sia nella access list di %s "
+            log_op.error("Non ho ottenuto l'op in %s: controlla che il bot sia nella access list di %s "
                       "e che sia identificato", channel, cfg.service)
 
     def _on_self_op_change(self, channel: str, adding: bool, by: str) -> None:
         ctx = self._base_context(None, channel)
         ctx["nick"] = by
         if adding:
-            log.info("Ho ricevuto l'op in %s da %s", channel, by)
+            log_op.info("Ho ricevuto l'op in %s da %s", channel, by)
             self.run_event("self_op", ctx)
         else:
-            log.warning("%s mi ha tolto l'op in %s", by, channel)
+            log_op.warning("%s mi ha tolto l'op in %s", by, channel)
             self.run_event("self_deop", ctx)
             if self.config.self_op.on_deop:
                 self._request_op(channel)
@@ -1025,9 +1146,10 @@ class Bot(BanMixin):
             self.memory = None
         if path is not None:
             self.memory = Memory(path, clock=lambda: self.wallclock())
+            self.memory.on_timing = self._db_timing
             self.memory.prune(cfg.memory.retention_days)
             self._last_prune = self.wallclock()
-            log.info("Memoria su %s", path)
+            log_mem.info("Memoria su %s", path)
 
     @property
     def seen_store(self) -> Memory | None:
@@ -1070,7 +1192,7 @@ class Bot(BanMixin):
             else:
                 self.say(nick, text)
         self.memory.mark_delivered(memos)
-        log.info("Consegnati %d messaggi a %s", len(memos), nick)
+        log_mem.info("Consegnati %d messaggi a %s", len(memos), nick)
         return len(memos)
 
     async def _deliver_memos_later(self, nick: str, channel: str, ctx: dict) -> None:
@@ -1157,7 +1279,7 @@ class Bot(BanMixin):
         text = self._r(opts.get("text", "{rest}"), ctx).strip()
         target, memos_cfg = ctx["_target"], self.config.memory.memos
         if self.seen_store is None:
-            log.warning("memo_add: la memoria è disabilitata (memory.enabled)")
+            log_mem.warning("memo_add: la memoria è disabilitata (memory.enabled)")
             return
         if not recipient or not text or not self._NICK_RE.match(recipient):
             self.say(target, self._mem_text("memo_usage", ctx))
@@ -1171,7 +1293,7 @@ class Bot(BanMixin):
             self.say(target, self._mem_text("memo_full", ctx, recipient=recipient))
         else:
             self.memory.add_memo(ctx.get("nick", "?"), recipient, text, ctx.get("channel", ""))
-            log.info("Messaggio di %s per %s salvato", ctx.get("nick"), recipient)
+            log_mem.info("Messaggio di %s per %s salvato", ctx.get("nick"), recipient)
             self.say(target, self._mem_text("memo_saved", ctx, recipient=recipient))
 
     def _action_memo_read(self, value: Any, ctx: dict) -> None:
@@ -1189,7 +1311,10 @@ class Bot(BanMixin):
         new = load_config(self.config.path)
         self.config = new
         self._open_memory()
-        log.info("Configurazione ricaricata da %s", new.path)
+        self._open_chatlog()
+        for hook in self.reload_hooks:
+            hook(new)
+        log_cfg.info("Configurazione ricaricata da %s", new.path)
         if self.registered:
             self._spawn(self._join_channels())
 
@@ -1200,6 +1325,8 @@ class Bot(BanMixin):
         if self.memory is not None:
             self.memory.close()
             self.memory = None
+        if self.chatlog is not None:
+            self.chatlog.close()
 
 
 def _redact(line: str) -> str:

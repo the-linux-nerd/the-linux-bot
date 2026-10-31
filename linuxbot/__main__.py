@@ -11,17 +11,7 @@ import sys
 from . import __version__
 from .bot import Bot
 from .config import ConfigError, load_config
-
-
-def setup_logging(level: str, logfile: str | None) -> None:
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
-    if logfile:
-        handlers.append(logging.FileHandler(logfile, encoding="utf-8"))
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)-7s %(message)s",
-        handlers=handlers,
-    )
+from .logsetup import configure_logging
 
 
 async def _main(bot: Bot) -> None:
@@ -72,9 +62,16 @@ def main(argv: list[str] | None = None) -> int:
               f"{len(config.channels)} canali.")
         return 0
 
-    level = "DEBUG" if args.verbose else str(config.logging.get("level", "INFO"))
-    setup_logging(level, config.logging.get("file"))
-    asyncio.run(_main(Bot(config)))
+    bot = Bot(config)
+    try:
+        configure_logging(config, bot, verbose=args.verbose)
+    except OSError as exc:
+        print(f"Impossibile aprire il file di log: {exc}", file=sys.stderr)
+        return 2
+    # !reload e SIGHUP riapplicano anche la sezione logging
+    bot.reload_hooks.append(lambda cfg: configure_logging(cfg, bot, verbose=args.verbose))
+    logging.getLogger("linuxbot.core").info("The Linux Bot %s avviato con %s", __version__, config.path)
+    asyncio.run(_main(bot))
     return 0
 
 

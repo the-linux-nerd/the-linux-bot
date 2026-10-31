@@ -19,7 +19,7 @@ from .templates import render
 if TYPE_CHECKING:
     from .bot import Bot
 
-log = logging.getLogger("linuxbot")
+log = logging.getLogger("linuxbot.bans")
 
 
 class BanMixin:

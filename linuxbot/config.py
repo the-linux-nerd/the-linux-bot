@@ -47,6 +47,7 @@ ACTIONS = {
     "memo_read": "consegna i messaggi in attesa per chi chiede",
     "banlist": "elenca i ban attivi",
     "baninfo": "dettagli sul ban di un nick o una maschera",
+    "stats": "statistiche di funzionamento del bot",
 }
 
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -181,6 +182,115 @@ class AuthConfig:
     nickserv: NickServConfig = field(default_factory=NickServConfig)
     oper: OperConfig = field(default_factory=OperConfig)
     user_modes: str = ""
+
+
+LOG_AREAS = ("connection", "irc", "auth", "channels", "commands", "greetings", "memory", "bans", "op",
+             "events", "config", "stats")
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def parse_size(value: Any) -> int:
+    """``10MB``, ``500KB``, ``1GB`` o un numero di byte."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([KMG]?)B?\s*", str(value), re.IGNORECASE)
+    if not m:
+        raise ConfigError(f"dimensione non valida: {value} (es. 10MB)")
+    return int(float(m.group(1)) * {"": 1, "K": 1024, "M": 1024 ** 2, "G": 1024 ** 3}[m.group(2).upper()])
+
+
+@dataclass
+class LogFileConfig:
+    path: str = ""
+    rotate: str = "size"          # size | daily
+    max_bytes: int = 10 * 1024 ** 2
+    backups: int = 7
+
+
+@dataclass
+class AlertsConfig:
+    enabled: bool = False
+    level: str = "ERROR"
+    to: list[str] = field(default_factory=list)   # canali e/o nick
+    method: str = "notice"                         # notice | say
+    min_interval: float = 300.0                    # stesso messaggio non più di una volta ogni N secondi
+    max_per_hour: int = 20
+
+
+@dataclass
+class ChatLogConfig:
+    enabled: bool = False
+    directory: str = "logs/chat"
+    channels: list[str] = field(default_factory=list)  # vuoto = tutti
+    private: bool = False
+    retention_days: int = 90                           # 0 = per sempre
+
+
+@dataclass
+class LoggingConfig:
+    level: str = "INFO"
+    console: bool = True
+    format: str = "text"          # text | json
+    file: LogFileConfig = field(default_factory=LogFileConfig)
+    levels: dict[str, str] = field(default_factory=dict)   # livello per area
+    redact: list[str] = field(default_factory=list)        # regex da nascondere
+    slow_threshold: float = 0.5   # secondi: azioni/righe più lente generano un avviso
+    slow_db_threshold: float = 0.05
+    alerts: AlertsConfig = field(default_factory=AlertsConfig)
+    chatlog: ChatLogConfig = field(default_factory=ChatLogConfig)
+
+
+def _level(value: Any, path: str) -> str:
+    value = str(value).upper()
+    if value not in LOG_LEVELS:
+        raise ConfigError(f"{path}: livello '{value}' non valido (validi: {', '.join(LOG_LEVELS)})")
+    return value
+
+
+def _parse_logging(data: dict) -> LoggingConfig:
+    lg = _section(data, "logging", "")
+    _check_keys(lg, set(LoggingConfig.__dataclass_fields__), "logging")
+    cfg = LoggingConfig(
+        level=_level(lg.get("level", "INFO"), "logging.level"),
+        console=bool(lg.get("console", True)),
+        format=str(lg.get("format", "text")).lower(),
+        slow_threshold=float(lg.get("slow_threshold", 0.5)),
+        slow_db_threshold=float(lg.get("slow_db_threshold", 0.05)),
+    )
+    if cfg.format not in ("text", "json"):
+        raise ConfigError("logging.format: deve essere 'text' o 'json'")
+    f = lg.get("file")
+    if isinstance(f, str):
+        f = {"path": f}
+    f = f or {}
+    if not isinstance(f, dict):
+        raise ConfigError("logging.file: deve essere un percorso o una mappa")
+    _check_keys(f, set(LogFileConfig.__dataclass_fields__), "logging.file")
+    cfg.file = LogFileConfig(path=str(f.get("path") or ""), rotate=str(f.get("rotate", "size")).lower(),
+                             max_bytes=parse_size(f.get("max_bytes", "10MB")), backups=int(f.get("backups", 7)))
+    if cfg.file.rotate not in ("size", "daily", "none"):
+        raise ConfigError("logging.file.rotate: deve essere 'size', 'daily' o 'none'")
+    levels = _section(lg, "levels", "logging.")
+    for area, lvl in levels.items():
+        if area not in LOG_AREAS:
+            raise ConfigError(f"logging.levels.{area}: area sconosciuta (disponibili: {', '.join(LOG_AREAS)})")
+        cfg.levels[area] = _level(lvl, f"logging.levels.{area}")
+    cfg.redact = [str(r) for r in _as_list(lg.get("redact"))]
+    for i, rx in enumerate(cfg.redact):
+        try:
+            re.compile(rx)
+        except re.error as exc:
+            raise ConfigError(f"logging.redact[{i}]: regex non valida: {exc}") from None
+    al = _section(lg, "alerts", "logging.")
+    _check_keys(al, set(AlertsConfig.__dataclass_fields__), "logging.alerts")
+    cfg.alerts = AlertsConfig(**{**al, "to": [str(t) for t in _as_list(al.get("to"))]})
+    cfg.alerts.level = _level(cfg.alerts.level, "logging.alerts.level")
+    if cfg.alerts.method not in ("notice", "say"):
+        raise ConfigError("logging.alerts.method: deve essere 'notice' o 'say'")
+    if cfg.alerts.enabled and not cfg.alerts.to:
+        raise ConfigError("logging.alerts.to: indica almeno un canale o un nick")
+    cl = _section(lg, "chatlog", "logging.")
+    _check_keys(cl, set(ChatLogConfig.__dataclass_fields__), "logging.chatlog")
+    cfg.chatlog = ChatLogConfig(**{**cl, "channels": [str(c) for c in _as_list(cl.get("channels"))]})
+    return cfg
 
 
 @dataclass
@@ -321,11 +431,18 @@ class Config:
     responses: list[ResponseConfig] = field(default_factory=list)
     commands: dict[str, CommandConfig] = field(default_factory=dict)
     events: dict[str, list[dict]] = field(default_factory=dict)
-    logging: dict[str, Any] = field(default_factory=dict)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
     memory: MemoryConfig = field(default_factory=lambda: MemoryConfig())
     bans: BansConfig = field(default_factory=lambda: BansConfig())
     self_op: SelfOpConfig = field(default_factory=SelfOpConfig)
     path: Path | None = None
+
+    def resolve(self, path: str) -> Path:
+        """Percorsi relativi = relativi alla cartella del file di configurazione."""
+        p = Path(path)
+        if not p.is_absolute() and self.path is not None:
+            p = self.path.parent / p
+        return p
 
     @property
     def database_path(self) -> Path:
@@ -739,7 +856,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         server=server, identity=identity, auth=auth, channels=channels,
         admins=[str(a) for a in _as_list(data.get("admins"))], behavior=behavior,
         variables=variables, greetings=greetings, responses=responses, commands=commands,
-        events=events, logging=_section(data, "logging", ""), memory=_parse_memory(data), bans=_parse_bans(data), self_op=_parse_self_op(data),
+        events=events, logging=_parse_logging(data), memory=_parse_memory(data), bans=_parse_bans(data), self_op=_parse_self_op(data),
         path=path,
     )
 

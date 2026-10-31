@@ -187,9 +187,47 @@ memory:
     seen: "{who} è passato {ago} ({when}) in {where}, {what}."
     memo_delivered: "📬 {recipient}, {sender} ti ha lasciato un messaggio {ago}: {text}"
 
+# -----------------------------------------------------------------------------
+# Log tecnici (per debug e ottimizzazione) e log delle chat.
+# Si ricaricano con !reload / SIGHUP senza riavviare il bot.
+# -----------------------------------------------------------------------------
 logging:
-  level: INFO                        # DEBUG mostra tutto il traffico IRC
-  file: null                         # es. linuxbot.log
+  level: INFO                  # livello generale: DEBUG | INFO | WARNING | ERROR
+  console: true                # scrive anche a video (con systemd finisce nel journal)
+  format: text                 # text | json (una riga JSON per evento, per Loki/ELK/jq)
+  file:
+    path: logs/linuxbot.log    # relativo alla cartella di questo file
+    rotate: size               # size | daily | none
+    max_bytes: 10MB            # con rotate: size
+    backups: 7                 # quanti file vecchi tenere
+  # Livello per area, per fare debug mirato senza riempire il log. Aree:
+  #   connection irc auth channels commands greetings memory bans op events config stats
+  # "irc: DEBUG" mostra il traffico IRC grezzo (password nascoste).
+  levels:
+    irc: WARNING
+    # bans: DEBUG
+  # Testo da nascondere nei log (regex). Le password della configurazione sono
+  # già nascoste automaticamente ovunque compaiano. Con un gruppo () si nasconde
+  # solo quello.
+  redact:
+    - 'token=(\w+)'
+  slow_threshold: 0.5          # secondi: righe o azioni più lente generano un avviso
+  slow_db_threshold: 0.05      # secondi: operazioni sul database più lente generano un avviso
+  # Avvisi su IRC agli admin per i problemi gravi (con limiti anti-spam).
+  alerts:
+    enabled: true
+    level: ERROR               # WARNING per ricevere anche gli avvisi
+    to: ["#linux-staff"]       # canali e/o nick
+    method: notice             # notice | say
+    min_interval: 300          # lo stesso messaggio al massimo ogni 5 minuti
+    max_per_hour: 20
+  # Log delle conversazioni: logs/chat/<canale>/AAAA-MM-GG.log
+  chatlog:
+    enabled: false
+    directory: logs/chat
+    channels: []               # vuoto = tutti
+    private: false             # anche i messaggi privati (in logs/chat/_privati)
+    retention_days: 90         # 0 = per sempre
 
 # -----------------------------------------------------------------------------
 # Saluti agli utenti che entrano.
@@ -479,6 +517,13 @@ commands:
       - say: { to: "#linux-staff", text: "Annuncio inviato da {nick}: {args}" }
 
   # --- amministrazione del bot -------------------------------------------------
+  stats:
+    description: "Statistiche: attività, comandi, tempi, anti-flood, database, errori"
+    usage: "[generale|comandi|flood|db|errori]"
+    permission: admin
+    actions:
+      - stats
+
   entra:
     description: "Fa entrare il bot in un canale"
     usage: "<#canale> [chiave]"

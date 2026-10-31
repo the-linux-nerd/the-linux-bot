@@ -22,6 +22,9 @@ connessione, autenticazione, saluti, risposte automatiche, comandi e azioni.
   anche dopo che l'utente è uscito, `!banlist` e `!baninfo`, ripristino dei ban tolti a mano,
   espulsione di chi rientra, maschera configurabile.
 - **Eventi**: azioni eseguite su connessione, ingresso del bot in un canale, kick, ecc.
+- **Log** per debug e ottimizzazione: livelli per area, rotazione dei file, formato JSON,
+  password sempre nascoste, avvisi agli admin su IRC, log delle chat per canale, `!stats` con
+  tempi e contatori.
 - **Ricaricamento a caldo** della configurazione (comando `!reload` o `SIGHUP`).
 
 Unica dipendenza: [PyYAML](https://pyyaml.org/). Richiede Python 3.10+.
@@ -191,7 +194,7 @@ un esempio di tutto. In sintesi:
 | `events`     | azioni su eventi IRC |
 | `memory`     | database, "seen", messaggi lasciati e relativi testi |
 | `bans`       | registro dei ban, maschera, scadenze, enforcement e relativi testi |
-| `logging`    | livello e file di log |
+| `logging`    | log tecnici (livelli per area, rotazione, JSON, avvisi su IRC) e log delle chat |
 
 ### Testi e variabili
 
@@ -272,6 +275,61 @@ una mappa. Il canale di default è quello in cui è arrivato il comando.
 
 `connect`, `identified`, `self_join`, `self_op`, `self_deop`, `self_kick`, `join`, `part`,
 `quit`, `nick`, `kick`, `topic`, `invite`. Variabili extra: `{reason}`, `{victim}`, `{kicker}`, `{old_nick}`, `{new_nick}`, `{topic}`.
+
+## Log, debug e statistiche
+
+Tutto si configura nella sezione `logging` e si ricarica con `!reload` (o `SIGHUP`) senza
+riavviare il bot. `-v` da riga di comando forza il livello DEBUG ovunque.
+
+- **Aree**: ogni riga di log indica l'area da cui viene:
+  `2026-10-31 19:08:11 INFO    [op] Chiedo l'op in #linux (tentativo 1 di 2)`.
+  Le aree sono `connection`, `irc` (traffico grezzo, a DEBUG), `auth`, `channels`, `commands`,
+  `greetings`, `memory`, `bans`, `op`, `events`, `config`, `stats` (più `core` per il resto).
+  Con `levels` si fa debug mirato senza riempire il log:
+
+  ```yaml
+  logging:
+    level: INFO
+    levels: { irc: DEBUG, bans: DEBUG, memory: WARNING }
+  ```
+
+- **File con rotazione**: `file.rotate: size` (con `max_bytes`, es. `10MB`) oppure `daily`
+  (a mezzanotte), tenendo `backups` file vecchi. I percorsi relativi partono dalla cartella
+  della configurazione.
+- **JSON** (`format: json`): una riga per evento con `ts`, `level`, `area`, `msg` ed eventuale
+  `exc`, pronta per journald, Loki, ELK o `jq`.
+- **Password nascoste**: le password e le chiavi presenti nella configurazione vengono
+  sostituite con `********` ovunque compaiano nei log, anche se mandate con `raw`; in più
+  `PASS`, `OPER`, `AUTHENTICATE` e `IDENTIFY` ai services. Con `redact` aggiungi altre
+  espressioni regolari (con un gruppo `()` si nasconde solo quello).
+- **Lentezze**: righe e azioni che superano `slow_threshold` secondi, e operazioni sul
+  database oltre `slow_db_threshold`, generano un avviso con il nome dell'operazione e la durata.
+- **Avvisi su IRC** (`alerts`): gli eventi dal livello scelto (default `ERROR`) arrivano in
+  notice a canali o nick, ad esempio
+  `[ERRORE] op: Non ho ottenuto l'op in #linux: controlla che il bot sia nella access list di ChanServ`.
+  Lo stesso messaggio non viene ripetuto prima di `min_interval` secondi e in tutto non più di
+  `max_per_hour` avvisi l'ora.
+- **Log delle chat** (`chatlog`): un file al giorno per canale in
+  `logs/chat/<canale>/AAAA-MM-GG.log`, con messaggi (anche quelli del bot), azioni `/me`,
+  ingressi, uscite, kick, cambi di nick, topic e modi; opzionalmente i privati in
+  `logs/chat/_privati/`. I file più vecchi di `retention_days` vengono cancellati.
+
+  ```
+  [19:08:11] --> anna (a@host) è entrato in #linux
+  [19:08:11] <anna> !ping
+  [19:08:11] <TheLinuxBot> pong
+  ```
+
+- **`!stats`** (solo admin; `!stats generale|comandi|flood|db|errori` per una sezione sola):
+
+  ```
+  Attivo da 3 giorni e 2 ore, connesso da 5 ore a irc.example.org (connessioni: 2, cadute: 1, ultima: il server non risponde). Righe ricevute 18234 (1520 KB), inviate 912 (61 KB).
+  Comandi: 140 (help 41, seen 30, ...); tempo medio 0.2 ms, massimo 12 ms (!banlist). Risposte automatiche: 35 (saluto 20, ...).
+  Elaborazione righe: media 0.1 ms, massimo 9 ms, lente 0. Azioni: 170, media 0.1 ms, massimo 11 ms (banlist !banlist), lente 0.
+  Anti-flood: 15 messaggi ritardati, attesa totale 12.4 s, coda massima 6 (ora 0).
+  Database: 4210 operazioni, media 0.3 ms, massimo 18 ms (recent), lente 0.
+  Log: 1 errori, 4 avvisi. Ultimo errore (30/10 21:14, connection): Connessione persa: ...
+  ```
 
 ## Esecuzione come servizio
 

@@ -115,6 +115,17 @@ class IdentifyBeforeJoinTest(unittest.IsolatedAsyncioTestCase):
             await bot.drain()
         self.assertIn("JOIN #linux", bot.take())
 
+    async def test_rejoin_after_reload_does_not_wait_again(self):
+        bot = self.start()
+        bot.handle_line(":srv 900 Bot Bot!b@h Bot :You are now logged in as Bot")
+        await bot.drain()
+        bot.take()
+        bot.handle_line(":Bot!b@h JOIN #linux")
+        bot.channels.clear()
+        with self.assertNoLogs("linuxbot", "WARNING"):
+            await bot._join_channels()
+        self.assertIn("JOIN #linux", bot.take())
+
     async def test_wrong_password_joins_anyway(self):
         bot = self.start()
         with self.assertLogs("linuxbot", "ERROR"):
