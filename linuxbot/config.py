@@ -45,6 +45,8 @@ ACTIONS = {
     "recent": "elenca chi è passato negli ultimi N giorni",
     "memo_add": "lascia un messaggio per un utente",
     "memo_read": "consegna i messaggi in attesa per chi chiede",
+    "banlist": "elenca i ban attivi",
+    "baninfo": "dettagli sul ban di un nick o una maschera",
 }
 
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -291,6 +293,7 @@ class Config:
     events: dict[str, list[dict]] = field(default_factory=dict)
     logging: dict[str, Any] = field(default_factory=dict)
     memory: MemoryConfig = field(default_factory=lambda: MemoryConfig())
+    bans: BansConfig = field(default_factory=lambda: BansConfig())
     path: Path | None = None
 
     @property
@@ -386,6 +389,73 @@ def _parse_memory(data: dict) -> MemoryConfig:
     )
 
 
+BAN_MASKS = {
+    "host": "*!*@{host}",
+    "userhost": "*!{ident}@{host}",
+    "nick": "{nick}!*@*",
+    "full": "{nick}!{user}@{host}",
+}
+
+BAN_TEXTS = {
+    "kick_reason": "{reason}",
+    "kick_reason_temp": "{reason} (ban per {duration})",
+    "default_reason": "Bannato da {nick}",
+    "ban_done": "Ban impostato su {mask} in {channel}, {expiry}.",
+    "unban_done": "Ban rimosso: {mask} in {channel}.",
+    "unban_unknown": "Non ho ban registrati per {who} in {channel}: provo a togliere {mask}.",
+    "bad_duration": "Durata non valida: {duration}. Esempi: 30m, 2h, 1d, 1w, 1d12h, perm.",
+    "too_long": "La durata massima di un ban è {max}.",
+    "no_channel": "In quale canale? Indica il canale, es. #linux.",
+    "list_header": "Ban attivi in {channel} ({count}):",
+    "list_item": "#{id} {mask}{who} da {setter} {ago}, {expiry}{why}",
+    "list_more": "...e altri {count}. Usa {prefix}baninfo <nick|maschera|#id> per i dettagli.",
+    "list_empty": "Nessun ban attivo in {channel}.",
+    "info": "#{id} {mask} in {channel}{who}: messo da {setter} il {when} ({ago}), {expiry}{why}",
+    "info_removed": "Nessun ban attivo per {who}. L'ultimo (#{id} {mask}) è stato tolto {removed_how} {removed_ago}.",
+    "info_none": "Nessun ban registrato per {who}.",
+    "expiry_permanent": "permanente",
+    "expiry_in": "scade fra {remaining}",
+    "enforce_reason": "Sei bannato da questo canale{why}",
+}
+
+
+@dataclass
+class BansConfig:
+    enabled: bool = False
+    mask: str = "host"               # host | userhost | nick | full | modello con {nick} {ident} {user} {host}
+    enforce: bool = True             # rimette i ban tolti a mano ed espelle chi rientra
+    track_manual: bool = True        # registra anche i ban messi a mano dagli op
+    check_interval: float = 30.0     # ogni quanti secondi controllare i ban scaduti
+    default_duration: str = ""       # vuoto = permanente
+    max_duration: str = ""           # vuoto = nessun limite
+    list_max: int = 10
+    texts: dict[str, str] = field(default_factory=lambda: dict(BAN_TEXTS))
+
+    @property
+    def mask_template(self) -> str:
+        return BAN_MASKS.get(self.mask, self.mask)
+
+
+def _parse_bans(data: dict) -> BansConfig:
+    from .memory import parse_duration
+
+    b = _section(data, "bans", "")
+    _check_keys(b, set(BansConfig.__dataclass_fields__), "bans")
+    texts_d = _section(b, "texts", "bans.")
+    _check_keys(texts_d, set(BAN_TEXTS), "bans.texts")
+    cfg = BansConfig(**{k: v for k, v in b.items() if k != "texts"})
+    cfg.mask = str(cfg.mask)
+    if cfg.mask not in BAN_MASKS and not ("{host}" in cfg.mask or "{nick}" in cfg.mask):
+        raise ConfigError(f"bans.mask: usa {', '.join(BAN_MASKS)} oppure un modello con {{nick}}/{{host}}")
+    for key in ("default_duration", "max_duration"):
+        value = str(getattr(cfg, key) or "")
+        setattr(cfg, key, value)
+        if value and parse_duration(value) is None:
+            raise ConfigError(f"bans.{key}: durata non valida '{value}' (es. 2h, 1d, 1w)")
+    cfg.texts = {**BAN_TEXTS, **{k: str(v) for k, v in texts_d.items()}}
+    return cfg
+
+
 EVENTS = ("connect", "self_join", "join", "part", "quit", "kick", "self_kick", "nick", "topic", "invite")
 
 
@@ -404,7 +474,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         raise ConfigError("il file di configurazione deve contenere una mappa YAML")
     data = _expand_env(data)
     _check_keys(data, {"server", "identity", "auth", "channels", "admins", "behavior", "variables",
-                       "greetings", "responses", "commands", "events", "logging", "memory"}, "<radice>")
+                       "greetings", "responses", "commands", "events", "logging", "memory", "bans"}, "<radice>")
 
     # server
     srv = _section(data, "server", "")
@@ -613,7 +683,8 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         server=server, identity=identity, auth=auth, channels=channels,
         admins=[str(a) for a in _as_list(data.get("admins"))], behavior=behavior,
         variables=variables, greetings=greetings, responses=responses, commands=commands,
-        events=events, logging=_section(data, "logging", ""), memory=_parse_memory(data), path=path,
+        events=events, logging=_section(data, "logging", ""), memory=_parse_memory(data), bans=_parse_bans(data),
+        path=path,
     )
 
 

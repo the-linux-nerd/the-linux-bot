@@ -43,6 +43,7 @@ def args_variables(args: list[str], nick: str) -> dict[str, str]:
         "args": " ".join(args),
         "argc": str(len(args)),
         "rest": " ".join(args[1:]),
+        "rest2": " ".join(args[2:]),
         "target": args[0] if args else nick,
     }
     for i in range(1, 10):

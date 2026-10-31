@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from . import __version__
+from .bans import BanMixin
 from .config import Config, CommandConfig, ConfigError, ResponseConfig, load_config
 from .memory import Memory, format_ts, time_ago
 from .irc import (
@@ -34,13 +35,15 @@ class Channel:
     topic: str = ""
 
 
-class Bot:
+class Bot(BanMixin):
     def __init__(self, config: Config, clock: Callable[[], float] = time.monotonic,
                  wallclock: Callable[[], float] = time.time):
         self.config = config
         self.clock = clock
         self.wallclock = wallclock
         self.memory: Memory | None = None
+        self._banlist_buffer: dict = {}
+        self._ban_resync: dict = {}
         self._open_memory()
         self.nick = config.identity.nick
         self.channels: dict[str, Channel] = {}
@@ -245,6 +248,8 @@ class Bot:
             wait = auth.nickserv.wait
         self.run_event("connect", self._base_context())
         self._spawn(self._join_channels(wait))
+        if self.config.bans.enabled:
+            self._spawn(self._ban_expiry_loop())
 
     async def _join_channels(self, wait: float = 0.0) -> None:
         if wait:
@@ -319,6 +324,10 @@ class Bot:
             chan = self.channels.get(irc_lower(msg.params[1]))
             if chan:
                 chan.topic = msg.last
+        elif code == "367":
+            self._ban_list_entry(msg.params)
+        elif code == "368" and len(msg.params) > 1:
+            self._ban_list_end(msg.params[1])
         elif code in ("471", "473", "474", "475"):
             log.error("Impossibile entrare in %s: %s", msg.params[1] if len(msg.params) > 1 else "?", msg.last)
 
@@ -339,15 +348,18 @@ class Bot:
         if self._is_me(msg.nick):
             self.channels[key] = Channel(channel)
             log.info("Entrato in %s", channel)
+            self._ban_sync_start(channel)
             self.run_event("self_join", ctx)
             return
         chan = self.channels.get(key)
         if chan is not None:
             chan.users[irc_lower(msg.nick)] = set()
         self._track(msg.nick, channel, "join", mask=msg.prefix.mask if msg.prefix else "")
+        if msg.prefix and self._ban_on_join(msg.nick, msg.prefix.mask, channel):
+            return
         self.run_event("join", ctx)
         self._greet(msg, channel, ctx)
-        if self.memory and self.config.memory.memos.deliver_on_join:
+        if self.seen_store and self.config.memory.memos.deliver_on_join:
             self._spawn(self._deliver_memos_later(msg.nick, channel, ctx))
 
     def _on_part(self, msg: Message) -> None:
@@ -441,6 +453,10 @@ class Bot:
             if ch in self.prefix_modes and arg is not None:
                 modes = chan.users.setdefault(irc_lower(arg), set())
                 (modes.add if adding else modes.discard)(ch)
+                if adding and self._is_me(arg) and self._is_op_in(chan.name):
+                    self._ban_resync_apply(chan.name)
+            elif ch == "b" and arg is not None:
+                self._ban_on_mode(msg.nick, chan.name, adding, arg)
 
     # ------------------------------------------------------------------ messaggi
 
@@ -469,8 +485,11 @@ class Bot:
         text = strip_formatting(text).strip()
         ctx["message"] = text
         if not private:
+            chan = self.channels.get(irc_lower(channel))
+            if chan is not None:
+                chan.users.setdefault(irc_lower(msg.nick), set())
             self._track(msg.nick, channel, "message", text if self.config.memory.store_messages else "", mask)
-        if self.memory and self.config.memory.memos.deliver_on_message:
+        if self.seen_store and self.config.memory.memos.deliver_on_message:
             ctx["_memos_delivered"] = self._deliver_memos(msg.nick, channel, ctx)
 
         command_text = self._extract_command(text)
@@ -797,32 +816,6 @@ class Bot:
             return
         self.send(build_line("KICK", channel, nick, reason) if reason else build_line("KICK", channel, nick))
 
-    def _ban_mask(self, value: Any, ctx: dict) -> str:
-        if isinstance(value, dict):
-            raw = self._r(value.get("mask") or value.get("nick") or "{target}", ctx)
-        else:
-            raw = self._r(value or "{target}", ctx)
-        if not raw or "!" in raw or "@" in raw:
-            return raw
-        known = self.hosts.get(irc_lower(raw))
-        if known and "@" in known:
-            return "*!*@" + known.split("@", 1)[1]
-        return f"{raw}!*@*"
-
-    def _action_ban(self, value: Any, ctx: dict) -> None:
-        channel, mask = self._channel_of(value, ctx), self._ban_mask(value, ctx)
-        if channel and mask:
-            self.send(build_line("MODE", channel, "+b", mask))
-
-    def _action_unban(self, value: Any, ctx: dict) -> None:
-        channel, mask = self._channel_of(value, ctx), self._ban_mask(value, ctx)
-        if channel and mask:
-            self.send(build_line("MODE", channel, "-b", mask))
-
-    def _action_kickban(self, value: Any, ctx: dict) -> None:
-        self._action_ban(value, ctx)
-        self._action_kick(value, ctx)
-
     def _prefix_mode(self, mode: str, value: Any, ctx: dict) -> None:
         channel = self._channel_of(value, ctx)
         if isinstance(value, dict):
@@ -933,7 +926,7 @@ class Bot:
 
     def _open_memory(self) -> None:
         cfg = self.config
-        path = str(cfg.database_path) if cfg.memory.enabled else None
+        path = str(cfg.database_path) if (cfg.memory.enabled or cfg.bans.enabled) else None
         if self.memory is not None and self.memory.path == path:
             return
         if self.memory is not None:
@@ -945,8 +938,13 @@ class Bot:
             self._last_prune = self.wallclock()
             log.info("Memoria su %s", path)
 
+    @property
+    def seen_store(self) -> Memory | None:
+        """Il database, se la memoria (seen/messaggi) è abilitata."""
+        return self.memory if self.config.memory.enabled else None
+
     def _track(self, nick: str, channel: str, event: str, detail: str = "", mask: str = "") -> None:
-        if self.memory is None or not nick or self._is_me(nick):
+        if self.seen_store is None or not nick or self._is_me(nick):
             return
         mask = mask or self.hosts.get(irc_lower(nick), "")
         if mask and any(mask_match(m, mask) for m in self.config.behavior.ignore):
@@ -963,7 +961,7 @@ class Bot:
         return [c.name for c in self.channels.values() if irc_lower(nick) in c.users]
 
     def _deliver_memos(self, nick: str, channel: str, ctx: dict) -> int:
-        if self.memory is None:
+        if self.seen_store is None:
             return 0
         memos_cfg = self.config.memory.memos
         memos = self.memory.pending(nick, memos_cfg.expire_days)
@@ -1006,7 +1004,7 @@ class Bot:
         elif where := self._present_in(who):
             self.say(target, self._mem_text("seen_here", ctx, who=who, where=", ".join(where)))
         else:
-            entry = self.memory.last_seen(who) if self.memory else None
+            entry = self.seen_store.last_seen(who) if self.seen_store else None
             if entry is None:
                 self.say(target, self._mem_text("seen_never", ctx, who=who))
                 return
@@ -1048,7 +1046,7 @@ class Bot:
         channel = self._r(opts.get("channel"), ctx) if opts.get("channel") else ctx.get("channel", "")
         if opts.get("all_channels"):
             channel = ""
-        entries = self.memory.recent(seconds, channel or None, {irc_lower(self.nick)}) if self.memory else []
+        entries = self.memory.recent(seconds, channel or None, {irc_lower(self.nick)}) if self.seen_store else []
         target = ctx["_target"]
         if not entries:
             self.say(target, self._mem_text("recent_none", ctx, period=period))
@@ -1067,7 +1065,7 @@ class Bot:
         recipient = self._r(opts.get("to", "{arg1}"), ctx).strip().strip(":,")
         text = self._r(opts.get("text", "{rest}"), ctx).strip()
         target, memos_cfg = ctx["_target"], self.config.memory.memos
-        if self.memory is None:
+        if self.seen_store is None:
             log.warning("memo_add: la memoria è disabilitata (memory.enabled)")
             return
         if not recipient or not text or not self._NICK_RE.match(recipient):

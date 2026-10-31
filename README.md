@@ -18,6 +18,9 @@ connessione, autenticazione, saluti, risposte automatiche, comandi e azioni.
 - **Memoria** (SQLite): ricorda chi passa e risponde a "quando è passato mario?" e
   "chi è passato negli ultimi 3 giorni?"; si possono **lasciare messaggi** agli utenti, che il
   bot consegna quando entrano, quando scrivono o quando chiedono "ci sono messaggi per me?".
+- **Ban** con registro persistente: ban a tempo (`!tempban mario 2h flood`), unban per nick
+  anche dopo che l'utente è uscito, `!banlist` e `!baninfo`, ripristino dei ban tolti a mano,
+  espulsione di chi rientra, maschera configurabile.
 - **Eventi**: azioni eseguite su connessione, ingresso del bot in un canale, kick, ecc.
 - **Ricaricamento a caldo** della configurazione (comando `!reload` o `SIGHUP`).
 
@@ -92,6 +95,51 @@ puoi collegarle a qualsiasi comando o frase. Tutti i testi si cambiano in `memor
 `recent`, `recent_none`, `recent_more`, `memo_saved`, `memo_usage`, `memo_self`, `memo_bot`,
 `memo_too_long`, `memo_full`, `memo_delivered`, `memo_none`.
 
+## Ban
+
+Con `bans.enabled: true` ogni ban messo dal bot finisce in un registro (nello stesso database
+della memoria) con chi l'ha messo, quando, perché e quando scade. Il bot deve essere op/halfop.
+
+```
+<carla> !tempban mario 2h flood in canale
+  * mario è stato espulso da TheLinuxBot (flood in canale (bannato per 2 ore))
+  -TheLinuxBot- Ban impostato su *!*@93-40-1-2.casa.it in #linux, scade fra 2 ore.
+<carla> !banlist
+  -TheLinuxBot- #1 *!*@93-40-1-2.casa.it (mario) da carla pochi secondi fa, scade fra 2 ore: flood in canale
+  ... dopo 2 ore il bot toglie il ban da solo (anche se nel frattempo è stato riavviato)
+<carla> !baninfo mario
+  -TheLinuxBot- Nessun ban attivo per mario. L'ultimo (#1 ...) è stato tolto per scadenza 5 minuti fa.
+```
+
+| Comando | Cosa fa |
+|---|---|
+| `!ban <nick\|maschera> [motivo]` | ban permanente + kick (con una maschera espelle tutti quelli che corrispondono) |
+| `!tempban <nick\|maschera> <durata> [motivo]` | ban a tempo: `30m`, `2h`, `1d`, `1w`, `1d12h`; un numero da solo sono minuti |
+| `!unban <nick\|maschera\|#id>` | toglie il ban; col nick funziona anche se l'utente è uscito, usabile anche in privato |
+| `!banlist [#canale]` | ban attivi (in privato indica il canale) |
+| `!baninfo <nick\|maschera\|#id>` | dettagli, oppure l'ultimo ban già rimosso |
+
+Comportamento:
+
+- **Maschera** (`bans.mask`): `host` → `*!*@host` (default), `userhost` → `*!*ident@host`,
+  `nick` → `nick!*@*`, `full`, oppure un modello come `*!*@{host}`. Se l'utente è uscito
+  si usa l'ultimo host visto (serve `memory.enabled`). Si può cambiare per singolo comando
+  con `mask_type:` nell'azione.
+- **Enforcement** (`bans.enforce`): se un op toglie a mano (`/mode -b`) un ban messo dal bot,
+  il bot lo rimette; chi è nel registro e riesce a rientrare viene espulso. Per togliere un
+  ban si usa `!unban`. I ban messi a mano dagli op vengono registrati (`track_manual`) e
+  si possono togliere anche a mano.
+- **Sincronizzazione**: quando entra in un canale il bot legge la lista ban del server,
+  importa quelli che non conosce e rimette quelli del registro spariti (appena ha l'op).
+- **Protezioni**: il bot non banna mai sé stesso né un admin, nemmeno con una maschera larga.
+- `default_duration` rende a tempo anche i `!ban` senza durata; `max_duration` vieta ban più
+  lunghi (e quelli permanenti).
+
+Testi personalizzabili in `bans.texts`: `kick_reason`, `kick_reason_temp`, `default_reason`,
+`ban_done`, `unban_done`, `unban_unknown`, `bad_duration`, `too_long`, `no_channel`,
+`list_header`, `list_item`, `list_more`, `list_empty`, `info`, `info_removed`, `info_none`,
+`expiry_permanent`, `expiry_in`, `enforce_reason`.
+
 ## Struttura della configurazione
 
 Il file [`config.example.yaml`](config.example.yaml) è commentato riga per riga e contiene
@@ -111,12 +159,13 @@ un esempio di tutto. In sintesi:
 | `commands`   | comandi |
 | `events`     | azioni su eventi IRC |
 | `memory`     | database, "seen", messaggi lasciati e relativi testi |
+| `bans`       | registro dei ban, maschera, scadenze, enforcement e relativi testi |
 | `logging`    | livello e file di log |
 
 ### Testi e variabili
 
 In ogni testo puoi usare `{nick}`, `{channel}`, `{botnick}`, `{arg1}`, `{args}`, `{rest}`,
-`{target}`, `{date}`, `{time}`, i gruppi delle regex e le tue `variables` (l'elenco completo
+`{rest2}` (dal 3° argomento in poi), `{target}`, `{date}`, `{time}`, i gruppi delle regex e le tue `variables` (l'elenco completo
 è in testa a `config.example.yaml`). Se al posto di un testo metti una lista, il bot ne
 sceglie uno a caso. Un testo su più righe (`|` in YAML) diventa più messaggi.
 
@@ -167,8 +216,11 @@ una mappa. Il canale di default è quello in cui è arrivato il comando.
 | `notice` | `notice: "testo"` (all'utente) | `notice: {to: nick, text: "..."}` |
 | `me` | `me: "balla"` | `me: {to: "#canale", text: "..."}` |
 | `kick` | `kick: "{arg1}"` | `kick: {channel, nick, reason}` |
-| `ban` / `unban` | `ban: "{arg1}"` (nick → `*!*@host`) | `ban: {channel, mask}` o `{channel, nick}` |
-| `kickban` | `kickban: "{arg1}"` | `kickban: {channel, nick, reason}` |
+| `ban` | `ban: "{arg1}"` (nick → `*!*@host`) | `ban: {channel, nick\|mask, duration, reason, mask_type, confirm}` |
+| `kickban` | `kickban: "{arg1}"` | come `ban` |
+| `unban` | `unban: "{arg1}"` (nick, maschera o `#id`) | `unban: {channel, nick\|mask}` |
+| `banlist` | `banlist` | `banlist: {channel}` |
+| `baninfo` | `baninfo: "{arg1}"` | `baninfo: {nick\|mask, channel}` |
 | `op` `deop` `halfop` `dehalfop` `voice` `devoice` | `op: "{nick}"` | `op: {channel, nick}` |
 | `mode` | `mode: "#canale +m"` | `mode: {target, modes}` |
 | `topic` | `topic: "{args}"` | `topic: {channel, text}` |

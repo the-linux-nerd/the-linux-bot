@@ -13,6 +13,7 @@
 #    {users}                       utenti nel canale
 #    {prefix}                      primo prefisso dei comandi (es. "!")
 #    {args} {arg1}..{arg9} {rest}  argomenti del comando ({rest} = dal 2° in poi)
+#    {rest2}                       argomenti dal 3° in poi
 #    {target}                      {arg1} se presente, altrimenti {nick}
 #    {argc}                        numero di argomenti
 #    {match} {group1}.. {nome}     testo trovato dalle risposte regex
@@ -95,6 +96,32 @@ variables:
   site: "https://the-linux-nerd.example.org"
   rules_url: "https://the-linux-nerd.example.org/regole"
   pastebin: "https://paste.debian.net"
+
+# -----------------------------------------------------------------------------
+# Ban: registro persistente (stesso database della memoria), ban a tempo,
+# ripristino dei ban tolti a mano e sincronizzazione con il server all'ingresso.
+# Il bot deve essere op (o halfop) nel canale.
+# -----------------------------------------------------------------------------
+bans:
+  enabled: true
+  # Che maschera usare quando si banna un nick:
+  #   host     -> *!*@host            (default: non rientra cambiando nick)
+  #   userhost -> *!*ident@host       (utile per host condivisi, es. bouncer)
+  #   nick     -> nick!*@*
+  #   full     -> nick!user@host
+  # oppure un modello, es. "*!*@{host}" (variabili {nick} {user} {ident} {host})
+  mask: host
+  enforce: true            # se un op toglie a mano un ban del bot, il bot lo rimette;
+                           # chi rientra pur essendo nel registro viene espulso.
+                           # Per togliere un ban usa !unban.
+  track_manual: true       # registra anche i ban messi a mano (/mode +b) dagli op
+  check_interval: 30       # secondi fra un controllo delle scadenze e l'altro
+  default_duration: ""     # vuoto = i ban senza durata sono permanenti
+  max_duration: ""         # es. "30d" per vietare ban più lunghi (e quelli permanenti)
+  list_max: 10             # righe massime di !banlist
+  # Tutti i testi sono personalizzabili (elenco completo delle chiavi nel README).
+  texts:
+    kick_reason_temp: "{reason} (bannato per {duration})"
 
 # -----------------------------------------------------------------------------
 # Memoria: il bot ricorda chi passa (per "seen" e "chi è passato") e conserva
@@ -337,24 +364,47 @@ commands:
           reason: "{rest}"
 
   ban:
-    description: "Banna ed espelle un utente"
-    usage: "<nick> [motivo]"
+    description: "Banna ed espelle un utente (nick o maschera)"
+    usage: "<nick|maschera> [motivo]"
     permission: op
     min_args: 1
     private: false
     actions:
-      - kickban:
-          nick: "{arg1}"
-          reason: "Bannato da {nick}: {rest}"
+      - kickban: { nick: "{arg1}", reason: "{rest}", confirm: true }
+
+  tempban:
+    aliases: [tb]
+    description: "Ban a tempo: si toglie da solo alla scadenza (30m, 2h, 1d, 1w, 1d12h)"
+    usage: "<nick|maschera> <durata> [motivo]"
+    permission: op
+    min_args: 2
+    private: false
+    actions:
+      - kickban: { nick: "{arg1}", duration: "{arg2}", reason: "{rest2}", confirm: true }
 
   unban:
-    description: "Rimuove un ban (nick o maschera)"
-    usage: "<nick|maschera>"
+    description: "Rimuove un ban: per nick (anche se è uscito), maschera o #numero"
+    usage: "<nick|maschera|#id>"
     permission: op
     min_args: 1
-    private: false
     actions:
       - unban: "{arg1}"
+
+  banlist:
+    aliases: [bans]
+    description: "Elenca i ban attivi (in privato indica il canale)"
+    usage: "[#canale]"
+    permission: op
+    actions:
+      - banlist
+
+  baninfo:
+    description: "Chi ha bannato, quando, perché e quando scade"
+    usage: "<nick|maschera|#id>"
+    permission: op
+    min_args: 1
+    actions:
+      - baninfo: "{arg1}"
 
   op:
     description: "Dà op (a te o a un altro utente)"
