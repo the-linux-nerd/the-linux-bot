@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "the-linux-bot"
+dynamic = ["version"]
+description = "Bot IRC configurabile tramite YAML: saluti, risposte automatiche, comandi e moderazione"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+linuxbot = "linuxbot.__main__:main"
+
+[tool.setuptools]
+packages = ["linuxbot"]
+
+[tool.setuptools.dynamic]
+version = { attr = "linuxbot.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"

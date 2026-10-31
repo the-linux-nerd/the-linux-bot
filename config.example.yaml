@@ -1,0 +1,364 @@
+# =============================================================================
+#  The Linux Bot - configurazione di esempio
+#  Copia questo file in config.yaml e adattalo. Valida con:
+#      python -m linuxbot -c config.yaml --check
+#
+#  Le password possono venire dall'ambiente: ${NOME_VARIABILE} oppure
+#  ${NOME_VARIABILE:-valore_di_default}.
+#
+#  Nei testi puoi usare queste variabili:
+#    {nick} {user} {host} {mask}   chi ha scritto / è entrato
+#    {channel} {botnick} {server}  canale, nick del bot, server
+#    {date} {time} {weekday}       data e ora correnti
+#    {users}                       utenti nel canale
+#    {prefix}                      primo prefisso dei comandi (es. "!")
+#    {args} {arg1}..{arg9} {rest}  argomenti del comando ({rest} = dal 2° in poi)
+#    {target}                      {arg1} se presente, altrimenti {nick}
+#    {argc}                        numero di argomenti
+#    {match} {group1}.. {nome}     testo trovato dalle risposte regex
+#    + tutte le chiavi della sezione "variables"
+#  Per scrivere una graffa letterale usa {{ e }}.
+#  Dove è ammesso un testo puoi mettere una lista: ne verrà scelto uno a caso.
+# =============================================================================
+
+server:
+  host: irc.example.org
+  port: 6697
+  tls: true
+  tls_verify: true          # metti false solo per certificati self-signed
+  password: null            # password del server (comando PASS), se serve
+  encoding: utf-8
+
+identity:
+  nick: TheLinuxBot
+  alt_nicks: [TheLinuxBot_, TheLinuxBot__]
+  username: linuxbot
+  realname: "The Linux Bot"
+  version: "The Linux Bot - https://github.com/the-linux-nerd/the-linux-bot"
+
+# -----------------------------------------------------------------------------
+# Autenticazione. Puoi abilitare uno o più metodi insieme.
+# -----------------------------------------------------------------------------
+auth:
+  # SASL PLAIN: autenticazione con i services prima ancora della registrazione.
+  sasl:
+    enabled: false
+    username: TheLinuxBot
+    password: ${LINUXBOT_SASL_PASSWORD:-}
+
+  # Identificazione classica con NickServ dopo la connessione.
+  nickserv:
+    enabled: true
+    service: NickServ
+    command: "IDENTIFY {password}"   # alcuni services vogliono "IDENTIFY {botnick} {password}"
+    password: ${LINUXBOT_NICKSERV_PASSWORD:-cambiami}
+    wait: 3                          # secondi da attendere prima di entrare nei canali
+
+  # IRC operator (comando OPER): richiede un blocco oper nel server (ircd.conf).
+  oper:
+    enabled: true
+    name: linuxbot
+    password: ${LINUXBOT_OPER_PASSWORD:-cambiami}
+
+  user_modes: "+B"                   # modi utente da impostare dopo il login (+B = bot)
+
+channels:
+  - "#linux"
+  - name: "#linux-staff"
+    key: ${LINUXBOT_STAFF_KEY:-segreto}
+
+# Maschere nick!user@host degli amministratori del bot (permesso "admin").
+admins:
+  - "*!*@the-linux-nerd.example.org"
+  - "fabio!*@*"
+
+behavior:
+  command_prefixes: ["!", "."]
+  answer_when_addressed: true        # "TheLinuxBot: help" equivale a "!help"
+  respond_to_private: true           # risponde anche in query privata
+  ignore:                            # utenti ignorati completamente
+    - "*!*@*.spammer.example"
+    - "*bot*!*@*"
+  rejoin_on_kick: true
+  rejoin_delay: 5
+  reconnect_delay: 10                # raddoppia ad ogni tentativo fallito...
+  reconnect_max_delay: 300           # ...fino a questo massimo
+  flood_burst: 4                     # messaggi inviabili subito
+  flood_rate: 1.0                    # poi uno ogni N secondi
+  max_line_bytes: 400                # i messaggi più lunghi vengono spezzati
+  unknown_command_reply: null        # es. "{nick}: comando sconosciuto, prova {prefix}help"
+  permission_denied_reply: "{nick}: non hai i permessi per usare {command}."
+  cooldown_reply: null               # es. "Calma {nick}, riprova fra poco."
+
+# Variabili personalizzate utilizzabili in tutti i testi.
+variables:
+  site: "https://the-linux-nerd.example.org"
+  rules_url: "https://the-linux-nerd.example.org/regole"
+  pastebin: "https://paste.debian.net"
+
+logging:
+  level: INFO                        # DEBUG mostra tutto il traffico IRC
+  file: null                         # es. linuxbot.log
+
+# -----------------------------------------------------------------------------
+# Saluti agli utenti che entrano.
+# -----------------------------------------------------------------------------
+greetings:
+  enabled: true
+  channels: ["#linux"]               # vuoto = tutti i canali
+  delay: 2                           # secondi di attesa (se esce prima, niente saluto)
+  cooldown: 3600                     # non risalutare la stessa persona per un'ora
+  method: say                        # say = nel canale, notice = in privato
+  messages:
+    - "Ciao {nick}, benvenuto su {channel}! Scrivi {prefix}help per vedere cosa so fare."
+    - "Benvenuto {nick}! Siamo in {users} su {channel}. Le regole: {rules_url}"
+    - "Ehi {nick}, che distro usi oggi? :)"
+  actions: []                        # azioni eseguite dopo ogni saluto
+  # Regole per maschera: la prima con "messages" sostituisce i messaggi di default,
+  # le azioni di tutte le regole che corrispondono vengono eseguite.
+  rules:
+    - match: "*!*@the-linux-nerd.example.org"
+      messages: ["Bentornato capo {nick}!"]
+      actions:
+        - op: "{nick}"
+    - match: ["*!*@*.trusted.example", "*!*@unaffiliated/*"]
+      actions:
+        - voice: "{nick}"
+    - match: "*!*@*.irccloud.com"
+      method: notice
+    - match: "ChanServ!*@*"
+      skip: true                     # non salutare
+
+# -----------------------------------------------------------------------------
+# Risposte automatiche a ciò che viene scritto in canale.
+#   match: contains | word | exact | startswith | regex
+#   addressed: true  -> risponde solo se il messaggio cita il bot (o è in privato)
+#   stop: true       -> dopo questa risposta non controllare le successive
+# -----------------------------------------------------------------------------
+responses:
+  - name: saluto
+    match: word
+    patterns: ["ciao", "salve", "buongiorno", "buonasera"]
+    addressed: true
+    reply:
+      - "Ciao {nick}!"
+      - "Ehilà {nick}, come va?"
+    cooldown: 60
+
+  - name: distro-consigliata
+    match: regex
+    patterns: ['(che|quale) distro (mi )?consigli']
+    reply: "{nick}: per iniziare Linux Mint, Fedora o Debian vanno benissimo. Dipende da cosa ti serve!"
+    cooldown: 120
+
+  - name: chi-sei
+    match: regex
+    patterns: ['chi sei\??', 'cosa sai fare\??']
+    addressed: true
+    reply: "Sono {botnick}, il bot di {channel}. Prova {prefix}help."
+
+  - name: pastebin
+    match: regex
+    patterns: ['(?P<cosa>log|errore|output) (lungo|enorme)']
+    reply: "{nick}: per {cosa} lunghi usa un pastebin, ad esempio {pastebin}"
+    cooldown: 300
+
+  - name: grazie
+    match: word
+    patterns: ["grazie", "thanks"]
+    addressed: true
+    reply: ["Prego {nick}!", "Figurati!", "Di niente :)"]
+
+  - name: insulto
+    match: word
+    patterns: ["windows fa schifo"]
+    probability: 0.5                 # risponde solo una volta su due
+    actions:
+      - me: "annuisce in silenzio"
+
+# -----------------------------------------------------------------------------
+# Comandi. Chiave = nome del comando.
+#   permission: anyone | voice | halfop | op | admin
+#   reply: testo (o lista) inviato prima delle azioni
+#   method: say | notice   (come inviare "reply")
+#   private: false  -> non utilizzabile in query privata
+#   Forma breve:  nomecomando: "testo di risposta"
+# -----------------------------------------------------------------------------
+commands:
+  help:
+    aliases: [aiuto, comandi]
+    description: "Elenca i comandi o mostra i dettagli di uno"
+    usage: "[comando]"
+    actions:
+      - help: notice                 # notice (default) oppure say
+
+  regole:
+    aliases: [rules]
+    description: "Le regole del canale"
+    reply: "Le regole di {channel} sono qui: {rules_url}"
+    cooldown: 30
+
+  sito: "Il nostro sito: {site}"
+
+  ora:
+    description: "Data e ora del bot"
+    reply: "Sono le {time} di {weekday} {date}."
+
+  ping:
+    description: "Verifica che il bot sia vivo"
+    reply: ["pong!", "pong, {nick}!"]
+
+  man:
+    description: "Link alla pagina man di un comando"
+    usage: "<comando>"
+    min_args: 1
+    reply: "{nick}: https://man7.org/linux/man-pages/man1/{arg1}.1.html"
+
+  saluta:
+    description: "Fa salutare qualcuno dal bot"
+    usage: "[nick]"
+    reply: "Ciao {target}, {nick} ti saluta!"
+
+  abbraccia:
+    description: "Abbraccia qualcuno"
+    usage: "<nick>"
+    min_args: 1
+    actions:
+      - me: "abbraccia forte {arg1}"
+
+  # --- comandi di moderazione ------------------------------------------------
+  kick:
+    description: "Espelle un utente"
+    usage: "<nick> [motivo]"
+    permission: op
+    min_args: 1
+    private: false
+    actions:
+      - kick:
+          nick: "{arg1}"
+          reason: "{rest}"
+
+  ban:
+    description: "Banna ed espelle un utente"
+    usage: "<nick> [motivo]"
+    permission: op
+    min_args: 1
+    private: false
+    actions:
+      - kickban:
+          nick: "{arg1}"
+          reason: "Bannato da {nick}: {rest}"
+
+  unban:
+    description: "Rimuove un ban (nick o maschera)"
+    usage: "<nick|maschera>"
+    permission: op
+    min_args: 1
+    private: false
+    actions:
+      - unban: "{arg1}"
+
+  op:
+    description: "Dà op (a te o a un altro utente)"
+    usage: "[nick]"
+    permission: op
+    private: false
+    actions:
+      - op: "{target}"
+
+  voice:
+    description: "Dà voice"
+    usage: "[nick]"
+    permission: op
+    private: false
+    actions:
+      - voice: "{target}"
+
+  topic:
+    description: "Cambia il topic"
+    usage: "<testo>"
+    permission: op
+    min_args: 1
+    private: false
+    actions:
+      - topic: "{args}"
+
+  annuncio:
+    description: "Annuncio in tutti i canali principali"
+    usage: "<testo>"
+    permission: admin
+    min_args: 1
+    actions:
+      - say: { to: "#linux", text: "📢 {args}" }
+      - delay: 1
+      - say: { to: "#linux-staff", text: "Annuncio inviato da {nick}: {args}" }
+
+  # --- amministrazione del bot -------------------------------------------------
+  entra:
+    description: "Fa entrare il bot in un canale"
+    usage: "<#canale> [chiave]"
+    permission: admin
+    min_args: 1
+    actions:
+      - join: "{args}"
+
+  esci:
+    description: "Fa uscire il bot dal canale"
+    usage: "[#canale]"
+    permission: admin
+    actions:
+      - part: { channel: "{arg1}", reason: "Ordine di {nick}" }
+
+  dici:
+    description: "Fa parlare il bot in un canale"
+    usage: "<#canale> <testo>"
+    permission: admin
+    min_args: 2
+    actions:
+      - say: { to: "{arg1}", text: "{rest}" }
+
+  raw:
+    description: "Invia una riga IRC grezza"
+    usage: "<riga>"
+    permission: admin
+    min_args: 1
+    hidden: true
+    actions:
+      - raw: "{args}"
+
+  reload:
+    description: "Ricarica config.yaml senza riavviare"
+    permission: admin
+    actions:
+      - reload:
+          ok: "Configurazione ricaricata, {nick}."
+          error: "Errore: {error}"
+
+  quit:
+    description: "Spegne il bot"
+    permission: admin
+    hidden: true
+    actions:
+      - quit: "Spento da {nick}"
+
+# -----------------------------------------------------------------------------
+# Azioni legate agli eventi IRC.
+#   connect    dopo la registrazione al server
+#   self_join  quando il bot entra in un canale
+#   join/part/quit/nick/kick/topic/invite  quando lo fanno gli altri
+#   self_kick  quando il bot viene espulso
+# Variabili extra: {reason}, {victim}, {kicker}, {old_nick}, {new_nick}, {topic}
+# -----------------------------------------------------------------------------
+events:
+  self_join:
+    # Chiede l'op a ChanServ in ogni canale in cui entra.
+    - say: { to: ChanServ, text: "OP {channel} {botnick}" }
+    # Da IRC operator, su UnrealIRCd/InspIRCd si può anche forzare:
+    # - raw: "SAMODE {channel} +o {botnick}"
+
+  invite:
+    # Decommenta per accettare gli inviti in altri canali.
+    # - join: "{channel}"
+
+  self_kick:
+    - say: { to: "#linux-staff", text: "Sono stato espulso da {channel} da {kicker}: {reason}" }

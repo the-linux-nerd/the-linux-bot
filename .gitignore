@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+# la configurazione reale contiene password: non committarla
+config.yaml
+*.log
+.env
