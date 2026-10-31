@@ -64,9 +64,17 @@ auth:
   user_modes: "+B"                   # modi utente da impostare dopo il login (+B = bot)
 
 channels:
-  - "#linux"
+  - name: "#linux"
+    # Owner del canale: immuni a ban, kickban e kick del bot (anche con maschere
+    # larghe come *!*@*.it), e se un op li banna a mano il bot toglie il ban.
+    # Meglio usare maschere sull'host (o sul cloak dei services) che sul solo nick,
+    # perché un nick lo può prendere chiunque.
+    owners:
+      - "*!*@the-linux-nerd.example.org"
+      - "*!*@user/fabio"              # cloak dei services
   - name: "#linux-staff"
     key: ${LINUXBOT_STAFF_KEY:-segreto}
+    owners: ["*!*@the-linux-nerd.example.org"]
 
 # Maschere nick!user@host degli amministratori del bot (permesso "admin").
 admins:
@@ -119,6 +127,9 @@ bans:
   default_duration: ""     # vuoto = i ban senza durata sono permanenti
   max_duration: ""         # es. "30d" per vietare ban più lunghi (e quelli permanenti)
   list_max: 10             # righe massime di !banlist
+  immune:                  # immuni in TUTTI i canali (gli admin del bot lo sono sempre)
+    - "*!*@*.staff.example.org"
+  unban_immune: true       # toglie i ban messi da altri che colpiscono un immune
   # Tutti i testi sono personalizzabili (elenco completo delle chiavi nel README).
   texts:
     kick_reason_temp: "{reason} (bannato per {duration})"

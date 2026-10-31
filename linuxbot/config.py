@@ -183,6 +183,7 @@ class AuthConfig:
 class ChannelConfig:
     name: str
     key: str | None = None
+    owners: list[str] = field(default_factory=list)  # maschere immuni a ban e kick in questo canale
 
 
 @dataclass
@@ -304,6 +305,16 @@ class Config:
             db = self.path.parent / db
         return db
 
+    def immune_masks(self, channel: str = "") -> list[str]:
+        """Maschere immuni a ban e kick: admin, ``bans.immune`` e owner del canale."""
+        from .irc import irc_lower
+
+        masks = list(self.admins) + list(self.bans.immune)
+        for ch in self.channels:
+            if not channel or irc_lower(ch.name) == irc_lower(channel):
+                masks.extend(ch.owners)
+        return masks
+
     def find_command(self, name: str) -> CommandConfig | None:
         name = name.lower()
         for cmd in self.commands.values():
@@ -416,6 +427,7 @@ BAN_TEXTS = {
     "expiry_permanent": "permanente",
     "expiry_in": "scade fra {remaining}",
     "enforce_reason": "Sei bannato da questo canale{why}",
+    "immune": "{who} è immune a ban e kick in {channel}.",
 }
 
 
@@ -429,6 +441,8 @@ class BansConfig:
     default_duration: str = ""       # vuoto = permanente
     max_duration: str = ""           # vuoto = nessun limite
     list_max: int = 10
+    immune: list[str] = field(default_factory=list)  # maschere immuni in tutti i canali
+    unban_immune: bool = True        # toglie i ban messi da altri che colpiscono un immune
     texts: dict[str, str] = field(default_factory=lambda: dict(BAN_TEXTS))
 
     @property
@@ -445,6 +459,7 @@ def _parse_bans(data: dict) -> BansConfig:
     _check_keys(texts_d, set(BAN_TEXTS), "bans.texts")
     cfg = BansConfig(**{k: v for k, v in b.items() if k != "texts"})
     cfg.mask = str(cfg.mask)
+    cfg.immune = [str(m) for m in _as_list(cfg.immune)]
     if cfg.mask not in BAN_MASKS and not ("{host}" in cfg.mask or "{nick}" in cfg.mask):
         raise ConfigError(f"bans.mask: usa {', '.join(BAN_MASKS)} oppure un modello con {{nick}}/{{host}}")
     for key in ("default_duration", "max_duration"):
@@ -545,8 +560,9 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         if isinstance(ch, str):
             channels.append(ChannelConfig(ch))
         elif isinstance(ch, dict) and ch.get("name"):
-            _check_keys(ch, {"name", "key"}, f"channels[{i}]")
-            channels.append(ChannelConfig(str(ch["name"]), ch.get("key")))
+            _check_keys(ch, {"name", "key", "owners"}, f"channels[{i}]")
+            channels.append(ChannelConfig(str(ch["name"]), ch.get("key"),
+                                          [str(m) for m in _as_list(ch.get("owners"))]))
         else:
             raise ConfigError(f"channels[{i}]: deve essere un nome o una mappa con 'name'")
 

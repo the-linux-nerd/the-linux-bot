@@ -131,14 +131,29 @@ Comportamento:
   si possono togliere anche a mano.
 - **Sincronizzazione**: quando entra in un canale il bot legge la lista ban del server,
   importa quelli che non conosce e rimette quelli del registro spariti (appena ha l'op).
-- **Protezioni**: il bot non banna mai sé stesso né un admin, nemmeno con una maschera larga.
+- **Immuni**: il bot non banna né espelle mai sé stesso, gli admin del bot, gli owner del
+  canale (`channels[].owners`) e chi è in `bans.immune` (validi in tutti i canali). Vale anche
+  per le maschere larghe (`!ban *!*@*.it` viene rifiutato se colpisce un owner) e per
+  l'espulsione automatica. Se un op banna a mano un immune, il bot toglie il ban
+  (`bans.unban_immune`), anche quando lo trova nella lista ban del server entrando nel canale.
+
+  ```yaml
+  channels:
+    - name: "#linux"
+      owners: ["*!*@the-linux-nerd.example.org", "*!*@user/fabio"]
+  bans:
+    immune: ["*!*@*.staff.example.org"]
+  ```
+
+  Usa maschere sull'host o sul cloak dei services: una maschera sul solo nick (`fabio!*@*`)
+  la soddisfa chiunque prenda quel nick.
 - `default_duration` rende a tempo anche i `!ban` senza durata; `max_duration` vieta ban più
   lunghi (e quelli permanenti).
 
 Testi personalizzabili in `bans.texts`: `kick_reason`, `kick_reason_temp`, `default_reason`,
 `ban_done`, `unban_done`, `unban_unknown`, `bad_duration`, `too_long`, `no_channel`,
 `list_header`, `list_item`, `list_more`, `list_empty`, `info`, `info_removed`, `info_none`,
-`expiry_permanent`, `expiry_in`, `enforce_reason`.
+`expiry_permanent`, `expiry_in`, `enforce_reason`, `immune`.
 
 ## Struttura della configurazione
 
@@ -150,7 +165,7 @@ un esempio di tutto. In sintesi:
 | `server`     | host, porta, TLS, password, encoding |
 | `identity`   | nick, nick alternativi, username, realname, risposta CTCP VERSION |
 | `auth`       | `sasl`, `nickserv`, `oper`, `user_modes` |
-| `channels`   | canali (nome o `{name, key}`) |
+| `channels`   | canali (nome o `{name, key, owners}`) |
 | `admins`     | maschere `nick!user@host` degli amministratori del bot |
 | `behavior`   | prefissi dei comandi, utenti ignorati, anti-flood, riconnessione, messaggi di sistema |
 | `variables`  | variabili personalizzate usabili in tutti i testi |

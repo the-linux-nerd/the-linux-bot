@@ -76,12 +76,26 @@ class BanMixin:
         need = self.prefix_modes.index("h") if "h" in self.prefix_modes else self.prefix_modes.index("o")
         return self._rank(modes) <= need
 
-    def _protected(self: "Bot", mask: str) -> bool:
-        """True se la maschera colpirebbe il bot stesso o un admin del bot (presente o noto)."""
+    def is_immune(self: "Bot", mask: str, channel: str = "") -> bool:
+        """True se ``mask`` (un utente nick!user@host o una maschera di ban) si sovrappone a una maschera
+        immune: admin del bot, ``bans.immune`` o owner del canale (``channels[].owners``)."""
+        return any(mask_match(p, mask) or mask_match(mask, p) for p in self.config.immune_masks(channel))
+
+    def _hits_immune(self: "Bot", mask: str, channel: str) -> str | None:
+        """Se un ban con ``mask`` colpirebbe il bot o un immune, restituisce chi; altrimenti None."""
         own = self.hosts.get(irc_lower(self.nick), f"{self.nick}!*@*")
-        if mask_match(mask, own) or self.is_admin(mask):
-            return True
-        return any(mask_match(mask, full) and self.is_admin(full) for full in self.hosts.values())
+        if mask_match(mask, own):
+            return self.nick
+        for full in self.hosts.values():
+            if mask_match(mask, full) and self.is_immune(full, channel):
+                return Prefix.parse(full).nick
+        if self.is_immune(mask, channel):
+            return mask
+        return None
+
+    def _nick_immune(self: "Bot", nick: str, channel: str) -> bool:
+        known = self._known_mask(nick) or f"{nick}!*@*"
+        return self._is_me(nick) or self.is_immune(known, channel)
 
     def _users_matching(self: "Bot", channel: str, mask: str) -> list[str]:
         chan = self.channels.get(irc_lower(channel))
@@ -113,8 +127,17 @@ class BanMixin:
             mask_type = opts.get("mask_type")
             template = BAN_MASKS.get(str(mask_type), str(mask_type)) if mask_type else None
             mask = self._mask_for_nick(nick, template)
-        if self._is_me(nick) or self._protected(mask):
-            log.warning("Rifiuto di bannare %s (%s): è il bot o un admin", nick or mask, mask)
+        if self._is_me(nick):
+            protected: str | None = self.nick
+        elif nick and self._nick_immune(nick, channel):
+            protected = nick
+        else:
+            protected = self._hits_immune(mask, channel)
+        if protected is not None:
+            log.warning("Rifiuto di bannare %s (%s) in %s: colpirebbe %s, che è immune",
+                        nick or mask, mask, channel, protected)
+            if not self._is_me(nick):
+                self._ban_reply(ctx, self._bt("immune", ctx, who=protected, channel=channel, mask=mask))
             return
 
         dur_text = self._r(opts.get("duration", ""), ctx).strip() or bans_cfg.default_duration
@@ -144,7 +167,7 @@ class BanMixin:
                                    reason=reason, duration=duration)
             for victim in victims.values():
                 full = self.hosts.get(irc_lower(victim), f"{victim}!*@*")
-                if not self._is_me(victim) and not self.is_admin(full):
+                if not self._is_me(victim) and not self.is_immune(full, channel):
                     self.send(build_line("KICK", channel, victim, kick_reason))
         if opts.get("confirm"):
             self._ban_reply(ctx, self._bt("ban_done", ctx, mask=mask, channel=channel,
@@ -252,7 +275,7 @@ class BanMixin:
     def _ban_on_join(self: "Bot", nick: str, mask: str, channel: str) -> bool:
         """Chi entra ed è bannato (il ban era stato perso dal server) viene espulso. True se espulso."""
         store = self.ban_store
-        if store is None or not self.config.bans.enforce or self.is_admin(mask):
+        if store is None or not self.config.bans.enforce or self.is_immune(mask, channel):
             return False
         for ban in store.find_bans(channel):
             if mask_match(ban.mask, mask) and not (ban.expires and ban.expires <= self.wallclock()):
@@ -269,6 +292,14 @@ class BanMixin:
             return
         existing = store.find_bans(channel, mask=mask)
         if adding:
+            protected = self._hits_immune(mask, channel) if self.config.bans.unban_immune else None
+            if protected is not None:
+                log.warning("%s ha bannato %s in %s, che colpisce %s (immune): lo tolgo",
+                            setter, mask, channel, protected)
+                self.send(build_line("MODE", channel, "-b", mask))
+                for ban in existing:
+                    store.remove_ban(ban.id, self.nick)
+                return
             if not existing and self.config.bans.track_manual:
                 store.add_ban(channel, mask, "", setter, "", None, manual=True)
                 log.info("Registrato ban manuale %s in %s da %s", mask, channel, setter)
@@ -303,6 +334,13 @@ class BanMixin:
             return
         on_server = {irc_lower(m) for m, _, _ in buf}
         known = {irc_lower(b.mask) for b in store.find_bans(channel)}
+        if self.config.bans.unban_immune:
+            for mask, setter, ts in list(buf):
+                if self._hits_immune(mask, channel) is not None:
+                    log.warning("Il ban %s in %s colpisce un immune: lo tolgo", mask, channel)
+                    self.send(build_line("MODE", channel, "-b", mask))
+                    buf.remove((mask, setter, ts))
+                    on_server.discard(irc_lower(mask))
         if self.config.bans.track_manual:
             for mask, setter, ts in buf:
                 if irc_lower(mask) not in known:

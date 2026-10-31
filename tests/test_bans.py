@@ -127,8 +127,9 @@ class BanTest(unittest.IsolatedAsyncioTestCase):
     async def test_never_ban_self_or_admin(self):
         self.assertEqual(await self.op("!ban Bot"), [])
         await self.line(":boss!b@admin.host JOIN #linux")
-        self.assertEqual(await self.op("!ban boss"), [])
-        self.assertEqual(await self.op("!ban *!*@*"), [])
+        self.assertEqual(await self.op("!ban boss"), ["NOTICE op :boss è immune a ban e kick in #linux."])
+        self.assertEqual(len(await self.op("!ban *!*@*")), 1)
+        self.assertEqual(self.bot.memory.find_bans("#linux"), [])
 
     async def test_enforce_reapplies_removed_ban(self):
         await self.op("!ban mario")
@@ -179,6 +180,52 @@ class BanTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Nessun ban registrato per chiunque", (await self.op("!baninfo chiunque"))[0])
         self.assertIn("In quale canale", (await self.op("!banlist", target="Bot"))[0])
         self.assertIn("Ban attivi in #linux", (await self.op("!banlist #linux", target="Bot"))[0])
+
+    async def test_channel_owners_and_global_immune(self):
+        cfg = BANS.replace("bans: {enabled: true}", """
+bans: {enabled: true, immune: ['*!*@staff.example']}
+channels:
+  - {name: "#linux", owners: ["*!*@fondatore.example", "carla!*@*"]}
+  - {name: "#altro"}
+""")
+        bot = make_bot(cfg)
+        bot.wallclock.now = 1000 * DAY
+        for chan in ("#linux", "#altro"):
+            bot.handle_line(f":Bot!b@bot.host JOIN {chan}")
+            bot.handle_line(f":srv 353 Bot = {chan} :@Bot @op")
+        for who in ("anna!a@fondatore.example", "carla!c@x", "staff!s@staff.example", "mario!m@casa"):
+            for chan in ("#linux", "#altro"):
+                bot.handle_line(f":{who} JOIN {chan}")
+        bot.take()
+
+        async def op(text, chan="#linux"):
+            bot.handle_line(f":op!o@op.host PRIVMSG {chan} :{text}")
+            await bot.drain()
+            return bot.take()
+
+        self.assertEqual(await op("!ban anna"), ["NOTICE op :anna è immune a ban e kick in #linux."])
+        self.assertIn("immune", (await op("!tempban carla 1h"))[0])
+        self.assertIn("immune", (await op("!ban staff"))[0])
+        self.assertIn("immune", (await op("!ban staff", "#altro"))[0])   # immune ovunque
+        self.assertIn("immune", (await op("!ban *!*@*.example"))[0])     # maschera larga
+        out = await op("!ban anna", "#altro")                             # owner solo di #linux
+        self.assertEqual(out[0], "MODE #altro +b *!*@fondatore.example")
+        self.assertEqual(await op("!kick carla"), [])
+        # un op mette a mano un ban che colpisce un owner: il bot lo toglie
+        bot.handle_line(":op!o@op.host MODE #linux +b *!*@fondatore.example")
+        self.assertEqual(bot.take(), ["MODE #linux -b *!*@fondatore.example"])
+        self.assertEqual(bot.memory.find_bans("#linux"), [])
+        # anche nella lista ban del server all'ingresso
+        bot.handle_line(":Bot!b@bot.host JOIN #linux")
+        bot.handle_line(":srv 353 Bot = #linux :@Bot")
+        bot.handle_line(":srv 367 Bot #linux carla!*@* x 1")
+        bot.handle_line(":srv 368 Bot #linux :end")
+        self.assertEqual(bot.take(), ["MODE #linux +b", "MODE #linux -b carla!*@*"])
+        # un owner bannato a mano altrove riesce comunque a entrare senza essere espulso
+        bot.memory.add_ban("#linux", "*!*@fondatore.example", setter="x")
+        bot.handle_line(":anna!a@fondatore.example JOIN #linux")
+        await bot.drain()
+        self.assertNotIn("KICK", " ".join(bot.take()))
 
     async def test_mask_type(self):
         bot = make_bot(BANS.replace("bans: {enabled: true}", "bans: {enabled: true, mask: userhost}"))

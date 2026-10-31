@@ -812,7 +812,8 @@ class Bot(BanMixin):
         if not channel or not nick:
             log.warning("kick: canale o nick mancante")
             return
-        if self._is_me(nick):
+        if self._nick_immune(nick, channel):
+            log.warning("Rifiuto di espellere %s da %s: è immune", nick, channel)
             return
         self.send(build_line("KICK", channel, nick, reason) if reason else build_line("KICK", channel, nick))
 
