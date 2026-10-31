@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from . import __version__
+from .about import AboutMixin
 from .bans import BanMixin
 from .chatlog import ChatLog
 from .stats import Stats
@@ -45,7 +46,7 @@ class Channel:
     topic: str = ""
 
 
-class Bot(BanMixin):
+class Bot(AboutMixin, BanMixin):
     def __init__(self, config: Config, clock: Callable[[], float] = time.monotonic,
                  wallclock: Callable[[], float] = time.time):
         self.config = config
@@ -810,6 +811,7 @@ class Bot(BanMixin):
             users=str(len(self.channels[irc_lower(channel)].users)) if irc_lower(channel) in self.channels else "0",
             prefix=self.config.behavior.command_prefixes[0] if self.config.behavior.command_prefixes else "",
         )
+        ctx["in_channel"] = f" di {channel}" if channel else ""
         ctx["_target"] = channel or nick
         return ctx
 

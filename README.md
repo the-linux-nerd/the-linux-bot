@@ -22,6 +22,8 @@ connessione, autenticazione, saluti, risposte automatiche, comandi e azioni.
   anche dopo che l'utente è uscito, `!banlist` e `!baninfo`, ripristino dei ban tolti a mano,
   espulsione di chi rientra, maschera configurabile.
 - **Eventi**: azioni eseguite su connessione, ingresso del bot in un canale, kick, ecc.
+- **Si spiega da solo**: "TheLinuxBot: chi sei?", "come si usa seen?", `!info moderazione`:
+  presentazione, funzioni attive ricavate dalla configurazione, uso dei comandi con esempi.
 - **Log** per debug e ottimizzazione: livelli per area, rotazione dei file, formato JSON,
   password sempre nascoste, avvisi agli admin su IRC, log delle chat per canale, `!stats` con
   tempi e contatori.
@@ -76,6 +78,45 @@ Ci sono due significati di "operatore", e il bot li gestisce entrambi:
      self_deop:
        - say: { to: "#linux-staff", text: "{nick} mi ha tolto l'op in {channel}" }
    ```
+
+## Il bot si spiega agli utenti
+
+Se gli si chiede chi è o come funziona, il bot risponde con una presentazione (`about.intro`)
+seguita dall'elenco di **ciò che sa fare davvero**, costruito dalla configurazione: compaiono
+solo le funzioni attive (saluti, memoria, messaggi, domande a cui risponde, moderazione) e,
+per ognuna, i comandi che l'utente può usare.
+
+```
+<anna> TheLinuxBot: chi sei?
+<TheLinuxBot> anna: ti ho spiegato tutto in privato.
+  (in privato)
+  Ciao anna! Sono TheLinuxBot, il bot della community The Linux Nerd di #linux.
+  Ecco cosa so fare:
+  - Ricordo chi passa nei canali. Chiedimi "quando è passato mario?" ... (oppure !seen <nick>, !passati [giorni]).
+  - Posso riferire un messaggio a chi non c'è: ...
+  - Rispondo da solo ad alcune domande: quale distro scegliere, dove incollare log ed errori lunghi.
+  - Aiuto gli operatori a moderare: ...
+  Scrivi !help per l'elenco dei comandi, oppure "TheLinuxBot: come si usa <comando>?" ...
+<anna> TheLinuxBot, come si usa seen?
+  (in privato)
+  !seen <nick> — Quando è stato visto l'ultima volta un utente
+  Ti dico quando ho visto quell'utente l'ultima volta, dove e cosa stava facendo ...
+  Esempi: !seen mario
+  Puoi scriverlo anche: !visto.
+```
+
+- **Come si attiva**: con l'azione `explain`, collegata a un comando (`!info [comando|argomento]`)
+  e a frasi come "chi sei", "cosa sai fare", "come si usa X", "spiegami X" (vedi `responses`
+  nella config d'esempio). "come si usa !tempban?" funziona anche senza citare il bot.
+- **Comandi**: la spiegazione usa `description`, `usage`, `details` (righe in più) ed
+  `examples`, più gli alias e chi può usarlo ("Questo comando non puoi usarlo: è riservato, lo
+  usano gli operatori del canale"). I comandi `hidden` non vengono spiegati, tranne agli admin.
+- **Argomenti**: oltre a quelli automatici (`saluti`, `memoria`, `messaggi`, `domande`,
+  `moderazione`) puoi scriverne di tuoi in `about.topics`, con alias; hanno la precedenza.
+  Le risposte automatiche compaiono tra le "domande" se hanno una `description`.
+- **Dove risponde**: le spiegazioni brevi (fino a `inline_max_lines` righe) restano nel canale;
+  quelle lunghe vanno in privato (`method: private`), in notice o nel canale (`say`), con un
+  breve avviso nel canale. Tutti i testi fissi si cambiano in `about.texts`.
 
 ## Il saluto e la "@"
 
@@ -184,6 +225,7 @@ un esempio di tutto. In sintesi:
 | `identity`   | nick, nick alternativi, username, realname, risposta CTCP VERSION |
 | `auth`       | `sasl`, `nickserv`, `oper`, `user_modes` |
 | `self_op`    | come il bot ottiene e mantiene l'op nei canali |
+| `about`      | come il bot si presenta e spiega comandi e funzioni |
 | `channels`   | canali (nome o `{name, key, owners}`) |
 | `admins`     | maschere `nick!user@host` degli amministratori del bot |
 | `behavior`   | prefissi dei comandi, utenti ignorati, anti-flood, riconnessione, messaggi di sistema |
@@ -215,6 +257,9 @@ commands:
     min_args: 1
     private: false          # non usabile in query
     cooldown: 0
+    details:                # righe in più per "come si usa kick?" / !info kick
+      - "Il motivo è facoltativo e compare nel messaggio di espulsione."
+    examples: ["!kick mario basta flood"]
     actions:
       - kick: { nick: "{arg1}", reason: "{rest}" }
 
@@ -266,6 +311,8 @@ una mappa. Il canale di default è quello in cui è arrivato il comando.
 | `help` | `help` / `help: say` | `help: {method: notice}` |
 | `reload` | `reload` | `reload: {ok: "...", error: "... {error}"}` |
 | `quit` | `quit: "motivo"` | |
+| `explain` | `explain: "{args}"` (vuoto = presentazione) | `explain: {topic, method}` |
+| `stats` | `stats` | `stats: {section, method}` |
 | `seen` | `seen: "{arg1}"` | `seen: {nick}` |
 | `recent` | `recent: "{arg1}"` (giorni) | `recent: {days, hours, channel, all_channels}` |
 | `memo_add` | | `memo_add: {to: "{arg1}", text: "{rest}"}` |

@@ -113,6 +113,29 @@ variables:
   pastebin: "https://paste.debian.net"
 
 # -----------------------------------------------------------------------------
+# Il bot spiega sé stesso: "TheLinuxBot: chi sei?", "come si usa seen?", !info ...
+# L'elenco di cosa sa fare viene costruito dalla configurazione (solo le funzioni
+# attive). Le spiegazioni dei comandi usano description, details ed examples.
+# -----------------------------------------------------------------------------
+about:
+  intro:
+    - "Ciao {nick}! Sono {botnick}, il bot della community The Linux Nerd{in_channel}."
+    - "Mi gestisce lo staff: per problemi con me scrivete in #linux-staff."
+  auto_features: true      # aggiunge "Ecco cosa so fare" con le funzioni attive
+  method: private          # spiegazioni lunghe in query (private), notice o nel canale (say)
+  inline_max_lines: 2      # le risposte brevi restano dove è stata fatta la domanda
+  # Argomenti personalizzati ("TheLinuxBot: spiegami le regole", "!info regole").
+  # Sostituiscono quelli automatici con lo stesso nome (saluti, memoria, messaggi,
+  # domande, moderazione).
+  topics:
+    regole:
+      aliases: [regolamento, rules]
+      text:
+        - "Le regole in breve: rispetto per tutti, niente spam, niente flood, i log lunghi vanno su {pastebin}."
+        - "Il regolamento completo è qui: {rules_url}"
+  # texts: { redirect: "{nick}: ti ho risposto in privato." }
+
+# -----------------------------------------------------------------------------
 # Op per il bot: appena entra in un canale controlla di essere op e, se no, lo
 # chiede a ChanServ; riprova se non arriva e lo richiede se glielo tolgono.
 # Sui services il bot deve avere l'auto-op nel canale, ad esempio:
@@ -279,18 +302,40 @@ responses:
     cooldown: 60
 
   - name: distro-consigliata
+    description: "quale distro scegliere"
     match: regex
     patterns: ['(che|quale) distro (mi )?consigli']
     reply: "{nick}: per iniziare Linux Mint, Fedora o Debian vanno benissimo. Dipende da cosa ti serve!"
     cooldown: 120
 
+  # --- il bot spiega sé stesso (vedi la sezione "about") -----------------------
   - name: chi-sei
     match: regex
-    patterns: ['chi sei\??', 'cosa sai fare\??']
+    patterns: ['chi sei', 'cosa sai fare', 'come funzioni', 'che bot sei', 'presentati', 'a cosa servi']
     addressed: true
-    reply: "Sono {botnick}, il bot di {channel}. Prova {prefix}help."
+    cooldown: 10
+    actions:
+      - explain: ""
+
+  - name: spiegami
+    match: regex
+    # "TheLinuxBot: come si usa seen?", "TheLinuxBot, spiegami i ban a tempo"
+    patterns: ['^(spiegami|come si usa(no)?|come funziona(no)?|a cosa serv(e|ono)) (?P<cosa>.+?)\??$']
+    addressed: true
+    cooldown: 5
+    actions:
+      - explain: "{cosa}"
+
+  - name: come-si-usa-comando
+    match: regex
+    # anche senza citare il bot, se si nomina un comando: "come si usa !tempban?"
+    patterns: ['come (si usa|funziona) (?P<cmd>[!.]\w+)']
+    cooldown: 30
+    actions:
+      - explain: "{cmd}"
 
   - name: pastebin
+    description: "dove incollare log ed errori lunghi"
     match: regex
     patterns: ['(?P<cosa>log|errore|output) (lungo|enorme)']
     reply: "{nick}: per {cosa} lunghi usa un pastebin, ad esempio {pastebin}"
@@ -356,6 +401,14 @@ responses:
 #   Forma breve:  nomecomando: "testo di risposta"
 # -----------------------------------------------------------------------------
 commands:
+  info:
+    aliases: [spiega, about]
+    description: "Ti spiego chi sono, cosa so fare o come si usa un comando"
+    usage: "[comando|argomento]"
+    examples: ["{prefix}info", "{prefix}info seen", "{prefix}info moderazione"]
+    actions:
+      - explain: "{args}"
+
   help:
     aliases: [aiuto, comandi]
     description: "Elenca i comandi o mostra i dettagli di uno"
@@ -382,6 +435,7 @@ commands:
   man:
     description: "Link alla pagina man di un comando"
     usage: "<comando>"
+    examples: ["{prefix}man ls", "{prefix}man grep"]
     min_args: 1
     reply: "{nick}: https://man7.org/linux/man-pages/man1/{arg1}.1.html"
 
@@ -402,6 +456,10 @@ commands:
     aliases: [visto]
     description: "Quando è stato visto l'ultima volta un utente"
     usage: "<nick>"
+    details:
+      - "Ti dico quando ho visto quell'utente l'ultima volta, dove e cosa stava facendo (entrava, usciva, scriveva...)."
+      - "Puoi anche chiedermelo a parole: \"quando è passato mario?\""
+    examples: ["{prefix}seen mario"]
     actions:
       - seen: "{arg1}"
 
@@ -409,6 +467,7 @@ commands:
     aliases: [recenti, recent]
     description: "Chi è passato negli ultimi N giorni (default 7)"
     usage: "[giorni]"
+    examples: ["{prefix}passati", "{prefix}passati 3", "chi è passato negli ultimi 3 giorni?"]
     cooldown: 10
     actions:
       - recent: "{arg1}"
@@ -417,6 +476,10 @@ commands:
     aliases: [tell, memo]
     description: "Lascia un messaggio a un utente, glielo riferirò appena lo vedo"
     usage: "<nick> <messaggio>"
+    details:
+      - "Glielo consegno in privato quando entra, quando scrive qualcosa o quando chiede \"ci sono messaggi per me?\" (o {prefix}messaggi)."
+      - "I messaggi vanno al nick: chiunque usi quel nick li riceve. Dopo 60 giorni scadono."
+    examples: ["{prefix}lascia mario ricordati la riunione", "{botnick}: lascia un messaggio a mario: ciao!"]
     min_args: 2
     actions:
       - memo_add: { to: "{arg1}", text: "{rest}" }
@@ -451,6 +514,10 @@ commands:
     aliases: [tb]
     description: "Ban a tempo: si toglie da solo alla scadenza (30m, 2h, 1d, 1w, 1d12h)"
     usage: "<nick|maschera> <durata> [motivo]"
+    details:
+      - "Durate: m minuti, h ore, d giorni, w settimane, combinabili (1d12h). Un numero da solo sono minuti."
+      - "Il ban resta salvato anche se riavvio, e lo tolgo io alla scadenza."
+    examples: ["{prefix}tempban mario 2h flood", "{prefix}tempban *!*@*.spam.example 1d"]
     permission: op
     min_args: 2
     private: false

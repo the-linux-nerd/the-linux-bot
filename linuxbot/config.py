@@ -48,6 +48,7 @@ ACTIONS = {
     "banlist": "elenca i ban attivi",
     "baninfo": "dettagli sul ban di un nick o una maschera",
     "stats": "statistiche di funzionamento del bot",
+    "explain": "il bot spiega sé stesso, un comando o un argomento",
 }
 
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -293,6 +294,84 @@ def _parse_logging(data: dict) -> LoggingConfig:
     return cfg
 
 
+PERMISSION_WORDS = {
+    "anyone": "tutti",
+    "voice": "chi ha voice (o è operatore)",
+    "halfop": "gli halfop e gli operatori del canale",
+    "op": "gli operatori del canale",
+    "admin": "gli amministratori del bot",
+}
+
+ABOUT_TEXTS = {
+    "redirect": "{nick}: ti ho spiegato tutto in privato.",
+    "unknown": "Non so spiegarti \"{topic}\". Puoi chiedermi di: {topics}.",
+    "features_header": "Ecco cosa so fare:",
+    "commands_hint": "Scrivi {prefix}help per l'elenco dei comandi, oppure \"{botnick}: come si usa <comando>?\" "
+                     "o {prefix}info <comando|argomento> per i dettagli.",
+    "topics_hint": "Altri argomenti: {topics}.",
+    "examples": "Esempi: {examples}",
+    "aliases": "Puoi scriverlo anche: {aliases}.",
+    "who_can": "Chi può usarlo: {who}.",
+    "not_for_you": "Questo comando non puoi usarlo: è riservato, lo usano {who}.",
+    "private_only": "Si usa solo nei canali, non in privato.",
+}
+
+# Argomenti automatici: chiave -> (alias, testo). Compaiono solo se la funzione è attiva.
+AUTO_TOPICS = {
+    "saluti": (["saluto", "benvenuto"],
+               "Saluto chi entra{greet_where}."),
+    "memoria": (["seen", "visto", "chi è passato", "passati"],
+                "Ricordo chi passa nei canali. Chiedimi \"quando è passato mario?\" oppure "
+                "\"chi è passato negli ultimi 3 giorni?\"{memory_cmds}."),
+    "messaggi": (["memo", "lascia", "messaggio"],
+                 "Posso riferire un messaggio a chi non c'è: \"{botnick}: lascia un messaggio a mario: testo\"{memo_cmds}. "
+                 "Glielo consegno quando entra, quando scrive o quando chiede \"ci sono messaggi per me?\"."),
+    "domande": (["risposte", "faq"], "Rispondo da solo ad alcune domande: {questions}."),
+    "moderazione": (["ban", "kick", "tempban", "moderare"],
+                    "Aiuto gli operatori a moderare: ban anche a tempo (si tolgono da soli), elenco e dettagli dei ban, "
+                    "kick, op e voice{mod_cmds}. Gli owner del canale e gli admin del bot sono immuni."),
+}
+
+
+@dataclass
+class AboutConfig:
+    intro: list[str] = field(default_factory=lambda: [
+        "Ciao {nick}! Sono {botnick}, un bot IRC che dà una mano agli utenti{in_channel}."])
+    auto_features: bool = True        # aggiunge l'elenco delle funzioni attive
+    method: str = "private"           # private (query) | notice | say
+    inline_max_lines: int = 2         # risposte così corte restano dove è stata fatta la domanda
+    topics: dict[str, dict] = field(default_factory=dict)  # argomenti personalizzati
+    texts: dict[str, str] = field(default_factory=lambda: dict(ABOUT_TEXTS))
+
+
+def _parse_about(data: dict) -> AboutConfig:
+    ab = _section(data, "about", "")
+    _check_keys(ab, set(AboutConfig.__dataclass_fields__), "about")
+    cfg = AboutConfig()
+    if "intro" in ab:
+        cfg.intro = [str(x) for x in _as_list(ab["intro"])]
+    cfg.auto_features = bool(ab.get("auto_features", True))
+    cfg.method = str(ab.get("method", "private")).lower()
+    if cfg.method not in ("private", "notice", "say"):
+        raise ConfigError("about.method: deve essere 'private', 'notice' o 'say'")
+    cfg.inline_max_lines = int(ab.get("inline_max_lines", 2))
+    for name, topic in _section(ab, "topics", "about.").items():
+        where = f"about.topics.{name}"
+        if isinstance(topic, (str, list)):
+            topic = {"text": topic}
+        if not isinstance(topic, dict) or "text" not in topic:
+            raise ConfigError(f"{where}: deve essere un testo o una mappa con 'text'")
+        _check_keys(topic, {"text", "aliases"}, where)
+        cfg.topics[str(name).lower()] = {
+            "text": [str(t) for t in _as_list(topic["text"])],
+            "aliases": [str(a).lower() for a in _as_list(topic.get("aliases"))],
+        }
+    texts = _section(ab, "texts", "about.")
+    _check_keys(texts, set(ABOUT_TEXTS), "about.texts")
+    cfg.texts = {**ABOUT_TEXTS, **{k: str(v) for k, v in texts.items()}}
+    return cfg
+
+
 @dataclass
 class SelfOpConfig:
     enabled: bool = False
@@ -370,6 +449,7 @@ class ResponseConfig:
     name: str
     patterns: list[str]
     match: str = "contains"
+    description: str = ""  # per le spiegazioni del bot: es. "consigli sulle distro"
     case_sensitive: bool = False
     reply: Any = None
     method: str = "say"
@@ -416,6 +496,8 @@ class CommandConfig:
     cooldown: float = 0.0
     hidden: bool = False
     enabled: bool = True
+    details: list[str] = field(default_factory=list)   # spiegazione estesa (una riga per elemento)
+    examples: list[str] = field(default_factory=list)  # esempi d'uso, es. "!man ls"
 
 
 @dataclass
@@ -435,6 +517,7 @@ class Config:
     memory: MemoryConfig = field(default_factory=lambda: MemoryConfig())
     bans: BansConfig = field(default_factory=lambda: BansConfig())
     self_op: SelfOpConfig = field(default_factory=SelfOpConfig)
+    about: AboutConfig = field(default_factory=AboutConfig)
     path: Path | None = None
 
     def resolve(self, path: str) -> Path:
@@ -636,7 +719,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         raise ConfigError("il file di configurazione deve contenere una mappa YAML")
     data = _expand_env(data)
     _check_keys(data, {"server", "identity", "auth", "channels", "admins", "behavior", "variables",
-                       "greetings", "responses", "commands", "events", "logging", "memory", "bans", "self_op"}, "<radice>")
+                       "greetings", "responses", "commands", "events", "logging", "memory", "bans", "self_op", "about"}, "<radice>")
 
     # server
     srv = _section(data, "server", "")
@@ -783,6 +866,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         if r.get("reply") is None and not r.get("actions"):
             raise ConfigError(f"{where}: serve 'reply' oppure 'actions'")
         resp = ResponseConfig(
+            description=str(r.get("description", "")),
             name=str(r.get("name", f"response{i}")),
             patterns=patterns,
             match=match,
@@ -838,6 +922,8 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
             cooldown=float(c.get("cooldown", 0.0)),
             hidden=bool(c.get("hidden", False)),
             enabled=bool(c.get("enabled", True)),
+            details=[str(d) for d in _as_list(c.get("details"))],
+            examples=[str(e) for e in _as_list(c.get("examples"))],
         )
         for key in [cmd.name, *cmd.aliases]:
             if key in seen:
@@ -856,7 +942,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         server=server, identity=identity, auth=auth, channels=channels,
         admins=[str(a) for a in _as_list(data.get("admins"))], behavior=behavior,
         variables=variables, greetings=greetings, responses=responses, commands=commands,
-        events=events, logging=_parse_logging(data), memory=_parse_memory(data), bans=_parse_bans(data), self_op=_parse_self_op(data),
+        events=events, logging=_parse_logging(data), memory=_parse_memory(data), bans=_parse_bans(data), self_op=_parse_self_op(data), about=_parse_about(data),
         path=path,
     )
 
