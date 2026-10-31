@@ -1,0 +1,21 @@
+# Servizio utente: gira con il tuo utente, file nella tua home.
+# Installato da contrib/install-service.sh --user (i valori @...@ vengono sostituiti).
+[Unit]
+Description=The Linux Bot (bot IRC)
+Documentation=https://github.com/the-linux-nerd/the-linux-bot
+
+[Service]
+Type=simple
+# Password e chiavi (LINUXBOT_NICKSERV_PASSWORD, YOUTUBE_API_KEY, ...)
+EnvironmentFile=-@ENV_FILE@
+ExecStart=@APP_DIR@/.venv/bin/linuxbot -c @CONFIG@ --data-dir @DATA_DIR@
+# systemctl --user reload linuxbot = ricarica la configurazione senza disconnettere
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+# 2 = configurazione non valida, 3 = database già in uso: inutile riprovare
+RestartPreventExitStatus=2 3
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import logging.handlers
 import re
 import threading
@@ -97,6 +98,25 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(data, ensure_ascii=False)
 
 
+class JournalFormatter(logging.Formatter):
+    """Per systemd: niente data (la mette journald) e livello come prefisso ``<N>``,
+    così ``journalctl -p err`` mostra solo gli errori."""
+
+    PRIORITY = {logging.DEBUG: 7, logging.INFO: 6, logging.WARNING: 4, logging.ERROR: 3, logging.CRITICAL: 2}
+
+    def format(self, record: logging.LogRecord) -> str:
+        prio = self.PRIORITY.get(record.levelno, 6)
+        text = f"[{getattr(record, 'area', record.name)}] {record.getMessage()}"
+        if record.exc_info or record.exc_text:
+            text += "\n" + (record.exc_text or self.formatException(record.exc_info))
+        return "\n".join(f"<{prio}>{line}" for line in text.splitlines())
+
+
+def under_systemd() -> bool:
+    """True se lo standard error va al journal di systemd (servizio)."""
+    return bool(os.environ.get("JOURNAL_STREAM") or os.environ.get("INVOCATION_ID"))
+
+
 class StatsHandler(logging.Handler):
     """Conta avvisi ed errori per ``!stats``."""
 
@@ -171,7 +191,10 @@ def configure_logging(config: Config, bot: "Bot | None" = None, verbose: bool = 
 
     handlers: list[logging.Handler] = []
     if lc.console:
-        handlers.append(logging.StreamHandler())
+        console = logging.StreamHandler()
+        if lc.format == "text" and under_systemd():
+            console.setFormatter(JournalFormatter())
+        handlers.append(console)
     if lc.file.path:
         path = config.resolve(lc.file.path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,7 +207,8 @@ def configure_logging(config: Config, bot: "Bot | None" = None, verbose: bool = 
         else:
             handlers.append(logging.FileHandler(path, encoding="utf-8"))
     for handler in handlers:
-        handler.setFormatter(formatter)
+        if handler.formatter is None:
+            handler.setFormatter(formatter)
     if bot is not None:
         handlers.append(StatsHandler(bot))
         if lc.alerts.enabled:

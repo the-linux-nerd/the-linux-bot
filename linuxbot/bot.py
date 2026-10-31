@@ -1371,6 +1371,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
         if self.config.path is None:
             raise ConfigError("nessun file di configurazione da ricaricare")
         new = load_config(self.config.path)
+        new.data_dir = self.config.data_dir  # viene dalla riga di comando, non dal file
         self.config = new
         self._open_memory()
         self._open_chatlog()

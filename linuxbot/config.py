@@ -70,10 +70,11 @@ def _expand_env(value: Any) -> Any:
     if isinstance(value, str):
         def repl(m: re.Match[str]) -> str:
             name, default = m.group(1), m.group(2)
-            if name in os.environ:
-                return os.environ[name]
+            value = os.environ.get(name)
             if default is not None:
-                return default
+                return value if value else default  # come nella shell: ${VAR:-x} usa x anche se VAR è vuota
+            if value is not None:
+                return value
             raise ConfigError(f"variabile d'ambiente non definita: {name}")
         return _ENV.sub(repl, value)
     if isinstance(value, list):
@@ -773,21 +774,23 @@ class Config:
     karma: KarmaConfig = field(default_factory=KarmaConfig)
     schedules: list[ScheduleConfig] = field(default_factory=list)
     path: Path | None = None
+    data_dir: Path | None = None  # se impostata, i percorsi relativi (database, log, backup) partono da qui
 
     def resolve(self, path: str) -> Path:
-        """Percorsi relativi = relativi alla cartella del file di configurazione."""
-        p = Path(path)
-        if not p.is_absolute() and self.path is not None:
-            p = self.path.parent / p
+        """Percorsi relativi: dalla cartella dati (``--data-dir``) se c'è, altrimenti da quella della config."""
+        p = Path(path).expanduser()
+        if p.is_absolute() or str(p) == ":memory:":
+            return p
+        if self.data_dir is not None:
+            return self.data_dir / p
+        if self.path is not None:
+            return self.path.parent / p
         return p
 
     @property
     def database_path(self) -> Path:
-        """Percorso del database; se relativo, è relativo alla cartella del file di configurazione."""
-        db = Path(self.memory.database)
-        if not db.is_absolute() and self.path is not None:
-            db = self.path.parent / db
-        return db
+        """Percorso del database (``memory.database``), risolto come gli altri percorsi relativi."""
+        return self.resolve(self.memory.database)
 
     def immune_masks(self, channel: str = "") -> list[str]:
         """Maschere immuni a ban e kick: admin, ``bans.immune`` e owner del canale."""

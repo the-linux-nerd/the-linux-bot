@@ -51,7 +51,8 @@ cp config.example.yaml config.yaml   # poi modificalo
 ```
 
 Le password è meglio non scriverle nel file: in `config.yaml` usa `${LINUXBOT_OPER_PASSWORD}`
-e definisci la variabile d'ambiente (vedi `contrib/linuxbot.service` per systemd).
+e definisci la variabile d'ambiente. Per farlo partire all'avvio del computer vedi
+[Avvio automatico come servizio](#avvio-automatico-come-servizio).
 `config.yaml` è già in `.gitignore`.
 
 ## Diventare operatore
@@ -587,11 +588,73 @@ riavviare il bot. `-v` da riga di comando forza il livello DEBUG ovunque.
   Log: 1 errori, 4 avvisi. Ultimo errore (30/10 21:14, connection): Connessione persa: ...
   ```
 
-## Esecuzione come servizio
+## Avvio automatico come servizio
 
-Vedi [`contrib/linuxbot.service`](contrib/linuxbot.service): `systemctl reload linuxbot`
-invia `SIGHUP` e ricarica la configurazione senza disconnettere il bot.
-Le modifiche a `server` e `identity` richiedono un riavvio.
+Lo script [`contrib/install-service.sh`](contrib/install-service.sh) installa il bot come
+servizio systemd, che parte da solo all'accensione e si riavvia se cade. Può essere rilanciato
+quando vuoi (ad esempio dopo un `git pull`): non sovrascrive configurazione, password e dati.
+
+### Servizio utente (consigliato su un PC personale)
+
+```bash
+git clone https://github.com/the-linux-nerd/the-linux-bot && cd the-linux-bot
+contrib/install-service.sh
+```
+
+- Gira con il tuo utente; il programma resta nella cartella clonata (in un ambiente Python
+  `.venv` creato dallo script).
+- Configurazione in `~/.config/linuxbot/config.yaml`, password e chiavi in
+  `~/.config/linuxbot/linuxbot.env` (leggibile solo da te), dati, backup e log in
+  `~/.local/share/linuxbot`.
+- Abilita `loginctl enable-linger`, così il bot parte **all'accensione del computer anche
+  senza fare login** (se non ha i permessi, lo script dice il comando da lanciare con sudo).
+
+```bash
+systemctl --user status linuxbot      # stato
+journalctl --user -u linuxbot -f      # log in tempo reale
+systemctl --user reload linuxbot      # ricarica la configurazione senza disconnettere
+systemctl --user restart linuxbot     # riavvia (dopo un git pull, o se cambi server/identity)
+```
+
+### Servizio di sistema
+
+```bash
+contrib/install-service.sh --system   # chiede sudo
+```
+
+- Utente dedicato `linuxbot` senza login; programma in `/opt/the-linux-bot` (di root, non
+  modificabile dal servizio), configurazione in `/etc/linuxbot/config.yaml` (leggibile ma non
+  scrivibile dal bot), password in `/etc/linuxbot/linuxbot.env` (solo root), dati in
+  `/var/lib/linuxbot`.
+- Il servizio ha le protezioni di systemd attive (`ProtectSystem=strict`, `ProtectHome`,
+  `NoNewPrivileges`, nessuna capability...): può scrivere solo nella sua cartella dati.
+- Per aggiornare: `git pull` e di nuovo `contrib/install-service.sh --system`.
+
+```bash
+systemctl status linuxbot
+journalctl -u linuxbot -f             # -p err: solo gli errori
+sudo systemctl reload linuxbot
+```
+
+### In entrambi i casi
+
+- **Dati esistenti**: se nella cartella clonata ci sono già `config.yaml` e `linuxbot.db`
+  (perché avevi avviato il bot a mano), lo script li copia nel posto nuovo: karma, ban e memoria
+  non si perdono. Se nel posto nuovo c'è già un database, non lo tocca.
+- **Password**: scrivile nel file `linuxbot.env` (`LINUXBOT_NICKSERV_PASSWORD=...`,
+  `YOUTUBE_API_KEY=...`); nella configurazione si richiamano con `${NOME}`.
+- **Controllo**: prima di avviare il servizio lo script valida la configurazione; se ci sono
+  errori lo abilita ma non lo avvia, e dice cosa correggere.
+- **Riavvii**: se il bot cade, systemd lo riavvia dopo 10 secondi; non insiste se la
+  configurazione è sbagliata o se il database è già usato da un'altra copia.
+- **Log**: con systemd i messaggi vanno nel journal con il livello corretto (`journalctl -p err`
+  mostra solo gli errori); il file di log, se configurato, va nella cartella dati.
+- `--uninstall` rimuove il servizio (configurazione e dati restano); `--dry-run` mostra cosa
+  farebbe lo script senza toccare niente.
+- I file di servizio sono in [`contrib/systemd/`](contrib/systemd/), se preferisci installarli
+  a mano. Le modifiche a `server` e `identity` richiedono un riavvio, il resto basta un `reload`.
+- Da riga di comando, `--data-dir <cartella>` (o `LINUXBOT_DATA_DIR`) sposta database, log e
+  backup con percorsi relativi in quella cartella invece che accanto alla configurazione.
 
 ## Sviluppo
 

@@ -211,3 +211,16 @@ commands: {{ping: pong}}
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JournalFormatTest(LoggingTestCase):
+    def test_journal_priorities_when_under_systemd(self):
+        import io
+        from unittest import mock
+        cfg = parse_config({"server": {"host": "h"}, "identity": {"nick": "n"}})
+        stream = io.StringIO()
+        with mock.patch.dict(os.environ, {"JOURNAL_STREAM": "8:1"}), mock.patch("sys.stderr", stream):
+            configure_logging(cfg)
+            logging.getLogger("linuxbot.op").error("niente op")
+            logging.getLogger("linuxbot.connection").info("connesso")
+        self.assertEqual(stream.getvalue().splitlines(), ["<3>[op] niente op", "<6>[connection] connesso"])

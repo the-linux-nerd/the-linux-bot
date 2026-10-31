@@ -1,0 +1,50 @@
+# Servizio di sistema: utente dedicato "linuxbot", programma in @APP_DIR@,
+# configurazione in /etc/linuxbot, dati in /var/lib/linuxbot.
+# Installato da contrib/install-service.sh --system (i valori @...@ vengono sostituiti).
+[Unit]
+Description=The Linux Bot (bot IRC)
+Documentation=https://github.com/the-linux-nerd/the-linux-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=linuxbot
+Group=linuxbot
+# Password e chiavi (LINUXBOT_NICKSERV_PASSWORD, YOUTUBE_API_KEY, ...)
+EnvironmentFile=-@ENV_FILE@
+ExecStart=@APP_DIR@/.venv/bin/linuxbot -c @CONFIG@ --data-dir @DATA_DIR@
+# systemctl reload linuxbot = ricarica la configurazione senza disconnettere
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+# 2 = configurazione non valida, 3 = database già in uso: inutile riprovare
+RestartPreventExitStatus=2 3
+TimeoutStopSec=15
+# /var/lib/linuxbot, creata da systemd e scrivibile solo dal servizio
+StateDirectory=linuxbot
+StateDirectoryMode=0750
+
+# Protezioni: il bot può solo leggere il sistema e scrivere nella sua cartella dati
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

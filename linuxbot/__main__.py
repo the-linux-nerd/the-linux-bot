@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
+from pathlib import Path
 
 from . import __version__
 from .bot import Bot
@@ -47,6 +49,9 @@ async def _main(bot: Bot) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="linuxbot", description="Bot IRC configurabile via YAML")
     parser.add_argument("-c", "--config", default="config.yaml", help="file di configurazione (default: config.yaml)")
+    parser.add_argument("--data-dir", default=os.environ.get("LINUXBOT_DATA_DIR") or None,
+                        help="cartella per database, log e backup se indicati con percorsi relativi "
+                             "(default: la cartella del file di configurazione; anche $LINUXBOT_DATA_DIR)")
     parser.add_argument("--check", action="store_true", help="valida la configurazione ed esce")
     parser.add_argument("-v", "--verbose", action="store_true", help="log di debug (mostra il traffico IRC)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -57,6 +62,13 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"Errore di configurazione: {exc}", file=sys.stderr)
         return 2
+    if args.data_dir:
+        config.data_dir = Path(args.data_dir).expanduser().resolve()
+        try:
+            config.data_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"Impossibile creare la cartella dati {config.data_dir}: {exc}", file=sys.stderr)
+            return 2
 
     if args.check:
         print(f"Configurazione valida: {len(config.commands)} comandi, {len(config.responses)} risposte, "

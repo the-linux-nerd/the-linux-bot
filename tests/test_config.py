@@ -22,6 +22,10 @@ class ConfigTest(unittest.TestCase):
         cfg = parse_config({"server": {"host": "h"}, "identity": {"nick": "n"},
                             "variables": {"x": "${LB_NOPE_UNSET:-def}"}})
         self.assertEqual(cfg.variables["x"], "def")
+        os.environ["LB_TEST_EMPTY"] = ""
+        cfg = parse_config({"server": {"host": "h"}, "identity": {"nick": "n"},
+                            "variables": {"x": "${LB_TEST_EMPTY:-def}", "y": "${LB_TEST_EMPTY}"}})
+        self.assertEqual((cfg.variables["x"], cfg.variables["y"]), ("def", ""))
         with self.assertRaises(ConfigError):
             parse_config({"server": {"host": "h"}, "identity": {"nick": "n"}, "variables": {"x": "${LB_NOPE_UNSET}"}})
 
@@ -50,3 +54,28 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.behavior.command_prefixes, ["?"])
         self.assertEqual(cfg.commands["sito"].reply, "http://x")
         self.assertEqual(cfg.commands["help"].actions, [{"help": None}])
+
+
+class DataDirTest(unittest.TestCase):
+    def test_relative_paths_follow_data_dir(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "etc" / "config.yaml"
+            cfg_path.parent.mkdir()
+            cfg_path.write_text("server: {host: h}\nidentity: {nick: n}\nmemory: {database: bot.db}\n")
+            cfg = load_config(cfg_path)
+            self.assertEqual(cfg.database_path, cfg_path.parent / "bot.db")
+            cfg.data_dir = Path(tmp) / "var"
+            self.assertEqual(cfg.database_path, Path(tmp) / "var" / "bot.db")
+            self.assertEqual(cfg.resolve("logs/x.log"), Path(tmp) / "var" / "logs" / "x.log")
+            self.assertEqual(cfg.resolve("/assoluto/x"), Path("/assoluto/x"))
+
+    def test_cli_data_dir(self):
+        import subprocess
+        import sys
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = subprocess.run([sys.executable, "-m", "linuxbot", "-c", str(ROOT / "config.example.yaml"),
+                                  "--data-dir", tmp, "--check"], capture_output=True, text=True, cwd=ROOT)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn(f"Database: {Path(tmp).resolve() / 'linuxbot.db'}", out.stdout)
