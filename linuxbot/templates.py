@@ -4,15 +4,28 @@ from __future__ import annotations
 
 import random
 import re
+from urllib.parse import quote, quote_plus
 from typing import Any, Mapping
 
-# Solo segnaposto semplici: {nome}. Niente attributi o indici, così il testo
-# scritto dagli utenti (che finisce nei valori, mai nel template) è innocuo.
-_PLACEHOLDER = re.compile(r"\{\{|\}\}|\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# Solo segnaposto semplici: {nome} o {nome|filtro|filtro}. Niente attributi o indici, così il
+# testo scritto dagli utenti (che finisce nei valori, mai nel template) è innocuo.
+_PLACEHOLDER = re.compile(r"\{\{|\}\}|\{([A-Za-z_][A-Za-z0-9_]*)((?:\|[a-z]+)*)\}")
+
+FILTERS = {
+    "url": lambda v: quote_plus(v),               # parametro di ricerca: spazi -> +
+    "path": lambda v: quote(v, safe=""),          # pezzo di percorso: spazi -> %20, / codificato
+    "lower": str.lower,
+    "upper": str.upper,
+    "strip": str.strip,
+    "title": str.title,
+}
 
 
 def render(template: str, variables: Mapping[str, Any]) -> str:
-    """Sostituisce i segnaposto; quelli sconosciuti restano invariati. ``{{``/``}}`` sono letterali."""
+    """Sostituisce i segnaposto; quelli sconosciuti restano invariati. ``{{``/``}}`` sono letterali.
+
+    Filtri: ``{args|url}`` (per i link di ricerca), ``{arg1|path}``, ``|lower``, ``|upper``, ``|strip``, ``|title``.
+    """
 
     def repl(match: re.Match[str]) -> str:
         token = match.group(0)
@@ -20,10 +33,13 @@ def render(template: str, variables: Mapping[str, Any]) -> str:
             return "{"
         if token == "}}":
             return "}"
-        name = match.group(1)
-        if name in variables and variables[name] is not None:
-            return str(variables[name])
-        return token
+        name, filters = match.group(1), [f for f in match.group(2).split("|") if f]
+        if name not in variables or variables[name] is None or any(f not in FILTERS for f in filters):
+            return token
+        value = str(variables[name])
+        for f in filters:
+            value = FILTERS[f](value)
+        return value
 
     return _PLACEHOLDER.sub(repl, str(template))
 

@@ -65,6 +65,11 @@ class AboutMixin:
         memo_resps = [r for r in cfg.responses if any(next(iter(a)) == "memo_add" for a in r.actions)]
         active["messaggi"] = cfg.memory.enabled and bool(memo_cmds or memo_resps)
         values["memo_cmds"] = self._cmd_list(memo_cmds, ctx)
+        active["ricerca"] = cfg.search.enabled and bool(cfg.search.providers)
+        values["providers"] = ", ".join(p.label for p in cfg.search.providers)
+        values["search_cmds"] = self._cmd_list(self._commands_using({"search"}), ctx)
+        active["karma"] = cfg.karma.enabled
+        values["karma_cmds"] = self._cmd_list(self._commands_using({"karma_show", "karma_top"}), ctx)
         questions = [r.description for r in cfg.responses if r.description]
         active["domande"] = bool(questions)
         values["questions"] = ", ".join(questions)

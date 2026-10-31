@@ -17,6 +17,8 @@ from . import __version__
 from .about import AboutMixin
 from .bans import BanMixin
 from .chatlog import ChatLog
+from .karma import KarmaMixin
+from .search import Searcher, http_get
 from .stats import Stats
 from .config import Config, CommandConfig, ConfigError, ResponseConfig, load_config
 from .memory import Memory, format_ts, time_ago
@@ -46,7 +48,7 @@ class Channel:
     topic: str = ""
 
 
-class Bot(AboutMixin, BanMixin):
+class Bot(AboutMixin, BanMixin, KarmaMixin):
     def __init__(self, config: Config, clock: Callable[[], float] = time.monotonic,
                  wallclock: Callable[[], float] = time.time):
         self.config = config
@@ -56,6 +58,7 @@ class Bot(AboutMixin, BanMixin):
         self.reload_hooks: list[Callable[[Config], None]] = []  # es. riconfigurazione dei log
         self.chatlog: ChatLog | None = None
         self._open_chatlog()
+        self.searcher: Searcher | None = Searcher(config.search) if config.search.enabled else None
         self.memory: Memory | None = None
         self._banlist_buffer: dict = {}
         self._op_tasks: dict[str, asyncio.Task] = {}
@@ -519,6 +522,8 @@ class Bot(AboutMixin, BanMixin):
                 if adding and self._is_me(arg) and self._is_op_in(chan.name):
                     self._ban_resync_apply(chan.name)
             elif ch == "b" and arg is not None:
+                if adding:
+                    self._karma_on_ban(chan.name, arg, msg.nick)
                 self._ban_on_mode(msg.nick, chan.name, adding, arg)
 
     # ------------------------------------------------------------------ messaggi
@@ -601,6 +606,8 @@ class Bot(AboutMixin, BanMixin):
         elif re.search(rf"(?<!\w){re.escape(self.nick)}(?!\w)", text, re.IGNORECASE):
             addressed = True
 
+        if command_text is None and not private and self.karma_from_message(text, ctx):
+            return
         if command_text is not None:
             self._handle_command(command_text, ctx, is_admin, private)
         elif not self._handle_responses(text, ctx, is_admin, private, addressed) and bare_command:
@@ -650,7 +657,7 @@ class Bot(AboutMixin, BanMixin):
             if beh.permission_denied_reply:
                 self.notice(ctx["nick"], render(beh.permission_denied_reply, ctx))
             return
-        if len(args) < cmd.min_args:
+        if len(args) < cmd.min_args or (cmd.args_pattern and not re.search(cmd.args_pattern, " ".join(args))):
             usage = f"{prefix}{cmd.name} {cmd.usage}".strip()
             self.notice(ctx["nick"], f"Uso: {usage}")
             return
@@ -1058,6 +1065,45 @@ class Bot(AboutMixin, BanMixin):
             else:
                 self.notice(ctx.get("nick") or ctx["_target"], line)
 
+    # ------------------------------------------------------------------ ricerca
+
+    def _action_search(self, value: Any, ctx: dict) -> None:
+        opts = value if isinstance(value, dict) else {"query": value if value is not None else "{args}"}
+        texts = self.config.search.texts
+        query = " ".join(self._r(opts.get("query", "{args}"), ctx).split()).strip(" ?")
+        target = ctx["_target"]
+        if self.searcher is None:
+            log.warning("search: la ricerca è disabilitata (search.enabled)")
+            return
+        if not query:
+            self.say(target, render(texts["usage"], ctx))
+            return
+        if len(query) < self.config.search.min_query_length:
+            self.say(target, render(texts["too_short"], ctx))
+            return
+        providers = [str(p) for p in _as_list_simple(opts.get("providers"))]
+        self._spawn(self._search_and_reply(query, providers, ctx, target))
+
+    async def _search_and_reply(self, query: str, providers: list[str], ctx: dict, target: str) -> None:
+        assert self.searcher is not None
+        texts = self.config.search.texts
+        results, failed = await self.searcher.search(query, providers or None)
+        log.info("Ricerca \"%s\" da %s: %d risultati%s", query, ctx.get("nick"), len(results),
+                 f" (falliti: {', '.join(failed)})" if failed else "")
+        vars_ = {**ctx, "query": query, "failed": ", ".join(failed)}
+        if not results:
+            self.say(target, render(texts["error" if failed else "none"], vars_))
+            return
+        for r in results:
+            meta = ""
+            if r.score is not None:
+                meta = render(texts["meta"], {**vars_, "score": r.score, "answers": r.answers or 0,
+                                              "accepted": texts["accepted"] if r.accepted else ""})
+            self.say(target, render(texts["result"], {**vars_, "label": r.label, "title": r.title,
+                                                      "link": r.link, "meta": meta}))
+        if failed:
+            self.say(target, render(texts["partial"], vars_))
+
     # ------------------------------------------------------------------ op per il bot
 
     def has_op(self, channel: str) -> bool:
@@ -1114,7 +1160,7 @@ class Bot(AboutMixin, BanMixin):
 
     def _open_memory(self) -> None:
         cfg = self.config
-        path = str(cfg.database_path) if (cfg.memory.enabled or cfg.bans.enabled) else None
+        path = str(cfg.database_path) if (cfg.memory.enabled or cfg.bans.enabled or cfg.karma.enabled) else None
         if self.memory is not None and self.memory.path == path:
             return
         if self.memory is not None:
@@ -1288,6 +1334,8 @@ class Bot(AboutMixin, BanMixin):
         self.config = new
         self._open_memory()
         self._open_chatlog()
+        fetch = self.searcher.fetch if self.searcher is not None else http_get
+        self.searcher = Searcher(new.search, fetch) if new.search.enabled else None
         for hook in self.reload_hooks:
             hook(new)
         log_cfg.info("Configurazione ricaricata da %s", new.path)
@@ -1313,3 +1361,9 @@ def _redact(line: str) -> str:
     if re.match(r"(?i)^PRIVMSG \S*serv :?(IDENTIFY|LOGIN)\b", line):
         return line.split(":", 1)[0] + ":******** (identificazione)"
     return line
+
+
+def _as_list_simple(value: Any) -> list:
+    if value is None:
+        return []
+    return list(value) if isinstance(value, (list, tuple)) else [value]

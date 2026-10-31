@@ -24,6 +24,12 @@ connessione, autenticazione, saluti, risposte automatiche, comandi e azioni.
 - **Eventi**: azioni eseguite su connessione, ingresso del bot in un canale, kick, ecc.
 - **Si spiega da solo**: "TheLinuxBot: chi sei?", "come si usa seen?", `!info moderazione`:
   presentazione, funzioni attive ricavate dalla configurazione, uso dei comandi con esempi.
+- **Link rapidi** per un canale tecnico: `!archwiki`, `!pkg`, `!tldr`, `!explainshell`, `!cve`,
+  `!rfc`, `!xkcd`, `!kernel`, `!distro`, `!web`, `!man`.
+- **Ricerca di risposte tecniche** su Stack Overflow (anche in italiano), unix.SE, Ask Ubuntu e
+  ArchWiki: `!cerca`, `?? domanda`, "TheLinuxBot: come faccio a ...?".
+- **Karma** del canale: `nick++`, `nick--`, "grazie nick", `!karma`, `!top`; punteggi
+  permanenti, regole anti-abuso, azzeramento al ban.
 - **Log** per debug e ottimizzazione: livelli per area, rotazione dei file, formato JSON,
   password sempre nascoste, avvisi agli admin su IRC, log delle chat per canale, `!stats` con
   tempi e contatori.
@@ -229,6 +235,8 @@ un esempio di tutto. In sintesi:
 | `auth`       | `sasl`, `nickserv`, `oper`, `user_modes` |
 | `self_op`    | come il bot ottiene e mantiene l'op nei canali |
 | `about`      | come il bot si presenta e spiega comandi e funzioni |
+| `search`     | ricerca su Stack Exchange e wiki MediaWiki |
+| `karma`      | karma del canale e relative regole |
 | `channels`   | canali (nome o `{name, key, owners}`) |
 | `admins`     | maschere `nick!user@host` degli amministratori del bot |
 | `behavior`   | prefissi dei comandi, utenti ignorati, anti-flood, riconnessione, messaggi di sistema |
@@ -315,6 +323,9 @@ una mappa. Il canale di default è quello in cui è arrivato il comando.
 | `reload` | `reload` | `reload: {ok: "...", error: "... {error}"}` |
 | `quit` | `quit: "motivo"` | |
 | `explain` | `explain: "{args}"` (vuoto = presentazione) | `explain: {topic, method}` |
+| `search` | `search: "{args}"` | `search: {query, providers: [unix, so]}` |
+| `karma_change` | `karma_change: "{arg1}"` | `karma_change: {nick, delta, quiet}` |
+| `karma_show` / `karma_top` / `karma_reset` | `karma_show: "{target}"` | `karma_top: {size, worst}` |
 | `stats` | `stats` | `stats: {section, method}` |
 | `seen` | `seen: "{arg1}"` | `seen: {nick}` |
 | `recent` | `recent: "{arg1}"` (giorni) | `recent: {days, hours, channel, all_channels}` |
@@ -325,6 +336,91 @@ una mappa. Il canale di default è quello in cui è arrivato il comando.
 
 `connect`, `identified`, `self_join`, `self_op`, `self_deop`, `self_kick`, `join`, `part`,
 `quit`, `nick`, `kick`, `topic`, `invite`. Variabili extra: `{reason}`, `{victim}`, `{kicker}`, `{old_nick}`, `{new_nick}`, `{topic}`.
+
+## Link rapidi
+
+Sono normali comandi con un `reply`, quindi si aggiungono o cambiano nel YAML. Due strumenti
+li rendono comodi:
+
+- **filtri nei testi**: `{args|url}` codifica il testo per un link di ricerca (spazi, `&`...),
+  `{arg1|path}` per un pezzo di percorso, e poi `|lower`, `|upper`, `|strip`, `|title`
+  (combinabili: `{arg1|lower|url}`);
+- **`args_pattern`**: una regex che gli argomenti devono rispettare, altrimenti il bot risponde
+  `Uso: ...`. Ad esempio `!rfc` accetta solo numeri e `!cve` solo `CVE-AAAA-NNNN`.
+
+```yaml
+commands:
+  archwiki:
+    aliases: [aw]
+    usage: "<argomento>"
+    min_args: 1
+    reply: "{nick}: https://wiki.archlinux.org/index.php?search={args|url}"
+  cve:
+    usage: "<CVE-AAAA-NNNN>"
+    args_pattern: '(?i)^cve-\d{4}-\d{4,}$'
+    reply: "{arg1|upper}: https://nvd.nist.gov/vuln/detail/{arg1|upper}"
+```
+
+## Ricerca di risposte tecniche
+
+Con `search.enabled` il bot cerca domande già risolte sui siti Stack Exchange (`type:
+stackexchange`, con `site`: `stackoverflow`, `it.stackoverflow`, `unix`, `askubuntu`,
+`superuser`, `serverfault`...) e nelle wiki MediaWiki (`type: mediawiki`, con l'URL di `api.php`,
+ad esempio l'ArchWiki).
+
+Esempio di formato (titoli e numeri sono illustrativi):
+
+```
+<anna> TheLinuxBot: come faccio a escludere una cartella con rsync?
+<TheLinuxBot> [unix.SE] How to exclude a directory with rsync (✔ 412 voti, 9 risposte) https://unix.stackexchange.com/q/...
+<TheLinuxBot> [ArchWiki] Rsync https://wiki.archlinux.org/title/Rsync
+<TheLinuxBot> [SO] ... https://stackoverflow.com/q/...
+```
+
+- Si attiva con l'azione `search` (`!cerca <domanda>`, `!unix <domanda>` solo su unix.SE),
+  con `?? domanda` e con "come faccio a / how do I ..." rivolto al bot.
+- I provider vengono interrogati in parallelo e i risultati presi a turno (uno per fonte), fino
+  a `max_results`; `✔` indica una risposta accettata. Con `only_answered` si vedono solo
+  domande con almeno una risposta.
+- **Limiti dell'API**: senza chiave Stack Exchange concede circa 300 richieste al giorno per
+  indirizzo IP, e ogni sito conta una richiesta. Con una chiave gratuita
+  (https://stackapps.com, in `search.stackexchange_key` o nella variabile `STACKEXCHANGE_KEY`)
+  si arriva a 10000. Il bot tiene in cache le ricerche per `cache_minutes`, rispetta le pause
+  (`backoff`) richieste dall'API e avvisa nel log quando la quota sta finendo.
+- Se un sito non risponde entro `timeout` secondi, il bot mostra gli altri risultati e lo dice.
+  Il bot deve poter raggiungere `api.stackexchange.com` e le wiki configurate.
+- Le ricerche funzionano meglio in inglese: le domande in italiano trovano soprattutto
+  risultati su `it.stackoverflow`.
+
+## Karma
+
+Con `karma.enabled` gli utenti si ringraziano scrivendo `mario++` (anche più d'uno nello stesso
+messaggio) o "grazie mario"; `mario--` toglie un punto. I punteggi stanno nel database e sono
+permanenti.
+
+```
+<anna> mario++ grazie, funziona!
+<TheLinuxBot> mario ha ora 13 punti karma (+1 da anna)
+<anna> !karma mario
+<TheLinuxBot> mario ha 13 punti karma (+15/-2), 2° su 40 in #linux.
+<anna> !top
+<TheLinuxBot> Classifica karma in #linux: 1. carla (21), 2. mario (13), ...
+```
+
+- **Regole anti-abuso**: niente karma a sé stessi; lo stesso utente può dare karma alla stessa
+  persona una volta ogni `cooldown` secondi (default un'ora) e al massimo `daily_limit` punti in
+  24 ore; il destinatario deve essere nel canale (`require_present`), così `c++`, `g++` o `i++`
+  scritti parlando di codice non contano; `ignore_words` esclude altre parole.
+- **Azzeramento al ban**: quando nel canale viene messo un ban (dal bot, con `!ban` o
+  `!tempban`, o a mano da un op), il karma di chi ne è colpito torna a zero, anche se è già
+  uscito: il bot confronta la maschera del ban con l'ultimo host noto di ogni utente con karma.
+  Il karma si azzera solo quando il server conferma il ban. Gli immuni (admin, owner) non vengono
+  toccati. `!karmareset <nick>` (per gli op) lo azzera a mano.
+- **Ambito**: `scope: channel` tiene una classifica per canale, `scope: global` una sola;
+  `channels` limita il karma ad alcuni canali.
+- Il karma è legato al **nick**: un cambio di nick non lo porta con sé.
+- Azioni: `karma_change` (`{nick, delta: 1|-1, quiet}`), `karma_show`, `karma_top` (`{size,
+  worst}`), `karma_reset`. Testi in `karma.texts`.
 
 ## Log, debug e statistiche
 

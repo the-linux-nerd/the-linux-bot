@@ -136,6 +136,49 @@ about:
   # texts: { redirect: "{nick}: ti ho risposto in privato." }
 
 # -----------------------------------------------------------------------------
+# Ricerca di risposte tecniche: !cerca, "?? domanda", "TheLinuxBot: come faccio a ...?"
+# Usa l'API pubblica di Stack Exchange (senza chiave: ~300 richieste al giorno per
+# IP; con una chiave gratuita da https://stackapps.com 10000) e l'API di MediaWiki.
+# Ogni ricerca interroga tutti i provider in parallelo (una richiesta per sito).
+# Il bot deve poter raggiungere api.stackexchange.com e wiki.archlinux.org.
+# -----------------------------------------------------------------------------
+search:
+  enabled: true
+  timeout: 8                 # secondi per provider
+  cache_minutes: 60          # la stessa domanda non viene ripetuta all'API per un'ora
+  max_results: 3             # risultati mostrati, a turno fra i provider
+  only_answered: true        # solo domande con almeno una risposta
+  stackexchange_key: ${STACKEXCHANGE_KEY:-}
+  providers:
+    # L'ordine conta: i risultati vengono presi a turno, un provider dopo l'altro.
+    - { name: so-it,     type: stackexchange, site: it.stackoverflow, label: "SO-it" }
+    - { name: unix,      type: stackexchange, site: unix,             label: "unix.SE" }
+    - { name: archwiki,  type: mediawiki, api: "https://wiki.archlinux.org/api.php", label: "ArchWiki" }
+    - { name: so,        type: stackexchange, site: stackoverflow,    label: "SO" }
+    - { name: askubuntu, type: stackexchange, site: askubuntu,        label: "AskUbuntu" }
+  # texts: { result: "[{label}] {title} {meta}{link}" }
+
+# -----------------------------------------------------------------------------
+# Karma: "mario++" / "mario--" (o "grazie mario") nei canali, punteggi permanenti
+# nel database, !karma, !top. Un ban (messo dal bot o a mano) azzera il karma.
+# -----------------------------------------------------------------------------
+karma:
+  enabled: true
+  scope: channel             # channel = classifica per canale | global = una sola
+  channels: ["#linux"]       # vuoto = tutti i canali
+  plusplus: true
+  allow_negative: true       # permette nick--
+  require_present: true      # solo per chi è nel canale: così "c++" e "g++" non contano
+  ignore_words: [c, g, i, j, k, n, x, y, notepad]
+  max_per_message: 3
+  cooldown: 3600             # stesso donatore -> stesso destinatario: una volta all'ora
+  daily_limit: 20            # punti che ognuno può dare in 24 ore
+  reset_on_ban: true         # il ban azzera il karma (anche ban a tempo e ban a mano)
+  announce: true             # "mario ha ora 12 punti karma (+1 da anna)"
+  announce_reset: false
+  top_size: 10
+
+# -----------------------------------------------------------------------------
 # Op per il bot: appena entra in un canale controlla di essere op e, se no, lo
 # chiede a ChanServ; riprova se non arriva e lo richiede se glielo tolgono.
 # Sui services il bot deve avere l'auto-op nel canale, ad esempio:
@@ -356,6 +399,33 @@ responses:
     addressed: true
     reply: ["Prego {nick}!", "Figurati!", "Di niente :)"]
 
+  # "grazie mario!" dà un punto karma a mario (stesse regole di mario++:
+  # deve essere nel canale, niente auto-karma, cooldown e limite giornaliero).
+  - name: grazie-karma
+    match: regex
+    patterns: ['^(grazie|grazie mille|thx|thanks|ty)[,:]?\s+(?P<chi>[^\s,.!?:]+)']
+    cooldown: 0
+    actions:
+      - karma_change: { nick: "{chi}", delta: 1 }
+
+  # --- ricerca di risposte tecniche (vedi la sezione "search") ---------------
+  - name: domanda-tecnica
+    match: regex
+    # "TheLinuxBot: come faccio a montare un disco usb?", "TheLinuxBot, how do I resize a partition"
+    patterns: ['^(come (faccio|posso|si fa) (a |ad |per )?|how (do i|to|can i) )(?P<q>.+?)\??$']
+    addressed: true
+    cooldown: 20
+    actions:
+      - search: "{q}"
+
+  - name: ricerca-rapida
+    match: regex
+    # "?? rsync escludere cartelle" anche senza citare il bot
+    patterns: ['^\?\?\s*(?P<q>\S.+)$']
+    cooldown: 20
+    actions:
+      - search: "{q}"
+
   # --- memoria: domande in linguaggio naturale --------------------------------
   - name: chi-e-passato
     match: regex
@@ -460,6 +530,134 @@ commands:
     min_args: 1
     actions:
       - me: "abbraccia forte {arg1}"
+
+  # --- link rapidi -------------------------------------------------------------
+  # {args|url} codifica il testo per un link di ricerca (spazi, &, ...);
+  # args_pattern rifiuta argomenti nel formato sbagliato e mostra "Uso: ...".
+  archwiki:
+    aliases: [aw, wiki]
+    description: "Cerca sull'ArchWiki (utile per qualsiasi distro)"
+    usage: "<argomento>"
+    min_args: 1
+    examples: ["{prefix}archwiki network manager", "{prefix}aw systemd-boot"]
+    reply: "{nick}: https://wiki.archlinux.org/index.php?search={args|url}"
+
+  pkg:
+    aliases: [pacchetto]
+    description: "Cerca un pacchetto su Debian, Arch e Fedora"
+    usage: "<nome>"
+    min_args: 1
+    args_pattern: '^[A-Za-z0-9.+_-]+$'
+    examples: ["{prefix}pkg htop"]
+    reply: "{arg1}: Debian https://packages.debian.org/search?keywords={arg1|url} · Arch https://archlinux.org/packages/?q={arg1|url} · Fedora https://packages.fedoraproject.org/search?query={arg1|url}"
+
+  tldr:
+    description: "Esempi pratici di un comando (tldr-pages)"
+    usage: "<comando>"
+    min_args: 1
+    args_pattern: '^[A-Za-z0-9._+-]+$'
+    examples: ["{prefix}tldr tar"]
+    reply: "{nick}: https://tldr.inbrowser.app/pages/common/{arg1|lower}"
+
+  explainshell:
+    aliases: [es]
+    description: "Spiega una riga di shell pezzo per pezzo"
+    usage: "<riga di comando>"
+    min_args: 1
+    examples: ["{prefix}es tar -xzvf archivio.tar.gz", "{prefix}es find . -name '*.log' -mtime +7 -delete"]
+    reply: "{nick}: https://explainshell.com/explain?cmd={args|url}"
+
+  cve:
+    description: "Scheda di una vulnerabilità sul database NVD"
+    usage: "<CVE-AAAA-NNNN>"
+    min_args: 1
+    args_pattern: '(?i)^cve-\d{4}-\d{4,}$'
+    examples: ["{prefix}cve CVE-2024-3094"]
+    reply: "{arg1|upper}: https://nvd.nist.gov/vuln/detail/{arg1|upper}"
+
+  rfc:
+    description: "Link a una RFC"
+    usage: "<numero>"
+    min_args: 1
+    args_pattern: '^\d{1,5}$'
+    examples: ["{prefix}rfc 1149"]
+    reply: "RFC {arg1}: https://www.rfc-editor.org/rfc/rfc{arg1}"
+
+  xkcd:
+    description: "Link a una striscia di xkcd (senza numero: l'ultima)"
+    usage: "[numero]"
+    args_pattern: '^(\d{1,5})?$'
+    examples: ["{prefix}xkcd 1168"]
+    reply: "https://xkcd.com/{arg1}"
+
+  kernel:
+    description: "Versioni attuali del kernel Linux"
+    reply: "Mainline, stable e longterm: https://www.kernel.org/ · changelog leggibile: https://kernelnewbies.org/LinuxVersions"
+
+  distro:
+    aliases: [dw]
+    description: "Scheda di una distribuzione su DistroWatch"
+    usage: "<distro>"
+    min_args: 1
+    args_pattern: '^[A-Za-z0-9-]+$'
+    examples: ["{prefix}distro debian"]
+    reply: "{nick}: https://distrowatch.com/table.php?distribution={arg1|lower}"
+
+  web:
+    aliases: [ddg]
+    description: "Link a una ricerca web (DuckDuckGo)"
+    usage: "<testo>"
+    min_args: 1
+    reply: "{nick}: https://duckduckgo.com/?q={args|url}"
+
+  # --- ricerca di risposte tecniche --------------------------------------------
+  cerca:
+    aliases: [so, search, stackoverflow]
+    description: "Cerca risposte su Stack Overflow, unix.SE, Ask Ubuntu e ArchWiki"
+    usage: "<domanda>"
+    min_args: 1
+    cooldown: 15
+    details:
+      - "Mostro i 3 risultati più pertinenti, uno per fonte, con voti e risposte. ✔ = risposta accettata."
+      - "Puoi anche scrivere \"?? domanda\" o chiedermi \"{botnick}: come faccio a ...?\". In inglese si trova di più."
+    examples: ["{prefix}cerca rsync escludere una cartella", "?? bash loop over files with spaces"]
+    actions:
+      - search: "{args}"
+
+  unix:
+    aliases: [use]
+    description: "Cerca solo su unix.stackexchange.com"
+    usage: "<domanda>"
+    min_args: 1
+    cooldown: 15
+    actions:
+      - search: { query: "{args}", providers: [unix] }
+
+  # --- karma ---------------------------------------------------------------------
+  karma:
+    description: "Punti karma di un utente (o i tuoi); \"{prefix}karma top\" per la classifica"
+    usage: "[nick]"
+    details:
+      - "Per dare un punto a chi ti ha aiutato scrivi nick++ (o \"grazie nick\"); nick-- per toglierlo."
+      - "Il karma non si dà da soli, una volta all'ora per persona, al massimo 20 punti al giorno. Un ban lo azzera."
+    examples: ["{prefix}karma", "{prefix}karma mario", "mario++"]
+    actions:
+      - karma_show: "{target}"
+
+  top:
+    aliases: [classifica]
+    description: "Classifica del karma del canale"
+    actions:
+      - karma_top
+
+  karmareset:
+    description: "Azzera il karma di un utente"
+    usage: "<nick>"
+    permission: op
+    min_args: 1
+    private: false
+    actions:
+      - karma_reset: "{arg1}"
 
   # --- memoria -----------------------------------------------------------------
   seen:

@@ -53,6 +53,28 @@ CREATE TABLE IF NOT EXISTS bans (
     removed_by  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS bans_active ON bans (channel_key, removed_ts);
+CREATE TABLE IF NOT EXISTS karma (
+    scope    TEXT NOT NULL,          -- canale (minuscolo) o '' se il karma è globale
+    nick_key TEXT NOT NULL,
+    nick     TEXT NOT NULL,
+    mask     TEXT NOT NULL DEFAULT '',
+    score    INTEGER NOT NULL DEFAULT 0,
+    plus     INTEGER NOT NULL DEFAULT 0,
+    minus    INTEGER NOT NULL DEFAULT 0,
+    resets   INTEGER NOT NULL DEFAULT 0,
+    updated  REAL NOT NULL,
+    PRIMARY KEY (scope, nick_key)
+);
+CREATE TABLE IF NOT EXISTS karma_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope        TEXT NOT NULL,
+    giver_key    TEXT NOT NULL,
+    receiver_key TEXT NOT NULL,
+    delta        INTEGER NOT NULL,
+    reason       TEXT NOT NULL DEFAULT '',
+    ts           REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS karma_log_giver ON karma_log (giver_key, ts);
 """
 
 
@@ -87,6 +109,20 @@ class Ban:
 
 
 _BAN_COLS = "id, channel, mask, nick, setter, reason, ts, expires, manual, removed_ts, removed_by"
+
+
+@dataclass
+class Karma:
+    nick: str
+    mask: str
+    score: int
+    plus: int
+    minus: int
+    resets: int
+    updated: float
+
+
+_KARMA_COLS = "nick, mask, score, plus, minus, resets, updated"
 
 
 @dataclass
@@ -173,6 +209,7 @@ class Memory:
         self.db.execute("DELETE FROM seen WHERE ts < ?", (cutoff,))
         self.db.execute("DELETE FROM memos WHERE delivered_ts IS NOT NULL AND delivered_ts < ?", (cutoff,))
         self.db.execute("DELETE FROM bans WHERE removed_ts IS NOT NULL AND removed_ts < ?", (cutoff,))
+        self.db.execute("DELETE FROM karma_log WHERE ts < ?", (cutoff,))  # i punteggi restano
         self.db.commit()
 
     # ------------------------------------------------------------------ memo
@@ -269,6 +306,82 @@ class Memory:
         self.db.execute("UPDATE bans SET removed_ts = ?, removed_by = ? WHERE id = ? AND removed_ts IS NULL",
                         (self.clock(), by, ban_id))
         self.db.commit()
+
+
+    # ------------------------------------------------------------------ karma
+
+    @_timed
+    def karma_get(self, scope: str, nick: str) -> Karma | None:
+        row = self.db.execute(f"SELECT {_KARMA_COLS} FROM karma WHERE scope = ? AND nick_key = ?",
+                              (irc_lower(scope), irc_lower(nick))).fetchone()
+        return Karma(*row) if row else None
+
+    @_timed
+    def karma_change(self, scope: str, nick: str, delta: int, giver: str, mask: str = "",
+                     reason: str = "") -> Karma:
+        scope, key, now = irc_lower(scope), irc_lower(nick), self.clock()
+        self.db.execute(
+            """INSERT INTO karma (scope, nick_key, nick, mask, score, plus, minus, updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (scope, nick_key) DO UPDATE SET
+                 nick = excluded.nick,
+                 mask = CASE WHEN excluded.mask != '' THEN excluded.mask ELSE karma.mask END,
+                 score = karma.score + excluded.score, plus = karma.plus + excluded.plus,
+                 minus = karma.minus + excluded.minus, updated = excluded.updated""",
+            (scope, key, nick, mask, delta, max(delta, 0), max(-delta, 0), now))
+        self.db.execute("INSERT INTO karma_log (scope, giver_key, receiver_key, delta, reason, ts) "
+                        "VALUES (?, ?, ?, ?, ?, ?)", (scope, irc_lower(giver), key, delta, reason, now))
+        self.db.commit()
+        return self.karma_get(scope, nick)  # type: ignore[return-value]
+
+    @_timed
+    def karma_reset(self, scope: str, nick: str, by: str, reason: str = "reset") -> int | None:
+        """Azzera il punteggio; restituisce quello precedente (None se non c'era)."""
+        current = self.karma_get(scope, nick)
+        if current is None:
+            return None
+        scope, key = irc_lower(scope), irc_lower(nick)
+        self.db.execute("UPDATE karma SET score = 0, resets = resets + 1, updated = ? WHERE scope = ? AND "
+                        "nick_key = ?", (self.clock(), scope, key))
+        self.db.execute("INSERT INTO karma_log (scope, giver_key, receiver_key, delta, reason, ts) "
+                        "VALUES (?, ?, ?, ?, ?, ?)", (scope, irc_lower(by), key, -current.score, reason, self.clock()))
+        self.db.commit()
+        return current.score
+
+    @_timed
+    def karma_top(self, scope: str, limit: int, worst: bool = False) -> list[Karma]:
+        order = "ASC" if worst else "DESC"
+        rows = self.db.execute(f"SELECT {_KARMA_COLS} FROM karma WHERE scope = ? AND score != 0 "
+                               f"ORDER BY score {order}, updated ASC LIMIT ?", (irc_lower(scope), limit))
+        return [Karma(*r) for r in rows]
+
+    @_timed
+    def karma_rank(self, scope: str, nick: str) -> tuple[int, int]:
+        """(posizione, totale) fra chi ha karma diverso da zero; posizione 0 se non in classifica."""
+        scope = irc_lower(scope)
+        me = self.karma_get(scope, nick)
+        total = self.db.execute("SELECT COUNT(*) FROM karma WHERE scope = ? AND score != 0", (scope,)).fetchone()[0]
+        if me is None or me.score == 0:
+            return 0, int(total)
+        above = self.db.execute("SELECT COUNT(*) FROM karma WHERE scope = ? AND score > ?",
+                                (scope, me.score)).fetchone()[0]
+        return int(above) + 1, int(total)
+
+    @_timed
+    def karma_all(self, scope: str) -> list[Karma]:
+        return [Karma(*r) for r in self.db.execute(f"SELECT {_KARMA_COLS} FROM karma WHERE scope = ?",
+                                                   (irc_lower(scope),))]
+
+    @_timed
+    def karma_last_given(self, scope: str, giver: str, receiver: str) -> float | None:
+        row = self.db.execute("SELECT MAX(ts) FROM karma_log WHERE scope = ? AND giver_key = ? AND receiver_key = ? "
+                              "AND reason = 'utente'", (irc_lower(scope), irc_lower(giver), irc_lower(receiver))).fetchone()
+        return row[0] if row and row[0] is not None else None
+
+    @_timed
+    def karma_given_since(self, giver: str, since: float) -> int:
+        return int(self.db.execute("SELECT COUNT(*) FROM karma_log WHERE giver_key = ? AND ts >= ? AND reason = 'utente'",
+                                   (irc_lower(giver), since)).fetchone()[0])
 
 
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "o": 3600, "d": 86400, "g": 86400, "w": 604800, "M": 2592000}

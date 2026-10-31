@@ -49,6 +49,11 @@ ACTIONS = {
     "baninfo": "dettagli sul ban di un nick o una maschera",
     "stats": "statistiche di funzionamento del bot",
     "explain": "il bot spiega sé stesso, un comando o un argomento",
+    "search": "cerca risposte su Stack Overflow, unix.SE, ArchWiki...",
+    "karma_change": "dà o toglie punti karma a un utente",
+    "karma_show": "mostra il karma di un utente",
+    "karma_top": "classifica del karma",
+    "karma_reset": "azzera il karma di un utente",
 }
 
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -333,6 +338,12 @@ AUTO_TOPICS = {
     "messaggi": (["memo", "lascia", "messaggio"],
                  "Posso riferire un messaggio a chi non c'è: \"{botnick}: lascia un messaggio a mario: testo\"{memo_cmds}. "
                  "Glielo consegno quando entra, quando scrive o quando chiede \"ci sono messaggi per me?\"."),
+    "ricerca": (["cerca", "stackoverflow", "stack overflow", "search"],
+                "Cerco risposte tecniche su {providers}: scrivi \"?? domanda\" oppure "
+                "\"{botnick}: come faccio a ...?\"{search_cmds}. In inglese si trova di più."),
+    "karma": (["punti", "++", "classifica"],
+              "Tengo il karma del canale: scrivi nick++ (o \"grazie nick\") per ringraziare chi ti ha aiutato, "
+              "nick-- per toglierlo{karma_cmds}. Il karma è permanente, ma un ban lo azzera."),
     "domande": (["risposte", "faq"], "Rispondo da solo ad alcune domande: {questions}."),
     "moderazione": (["ban", "kick", "tempban", "moderare"],
                     "Aiuto gli operatori a moderare: ban anche a tempo (si tolgono da soli), elenco e dettagli dei ban, "
@@ -376,6 +387,142 @@ def _parse_about(data: dict) -> AboutConfig:
     texts = _section(ab, "texts", "about.")
     _check_keys(texts, set(ABOUT_TEXTS), "about.texts")
     cfg.texts = {**ABOUT_TEXTS, **{k: str(v) for k, v in texts.items()}}
+    return cfg
+
+
+SE_HOSTS = {  # siti Stack Exchange -> dominio, per i link brevi /q/<id>
+    "stackoverflow": "stackoverflow.com", "it.stackoverflow": "it.stackoverflow.com",
+    "unix": "unix.stackexchange.com", "askubuntu": "askubuntu.com", "superuser": "superuser.com",
+    "serverfault": "serverfault.com", "security": "security.stackexchange.com",
+}
+
+SEARCH_TEXTS = {
+    "result": "[{label}] {title} {meta}{link}",
+    "meta": "({accepted}{score} voti, {answers} risposte) ",
+    "accepted": "✔ ",
+    "none": "{nick}: non ho trovato niente per \"{query}\". Prova a riformulare, magari in inglese.",
+    "error": "{nick}: la ricerca non è disponibile in questo momento, riprova più tardi.",
+    "partial": "(non ho potuto cercare su: {failed})",
+    "usage": "{nick}: cosa devo cercare? Es. {prefix}so come montare un disco usb",
+    "too_short": "{nick}: dammi qualche parola in più da cercare.",
+}
+
+
+@dataclass
+class SearchProvider:
+    name: str
+    type: str                 # stackexchange | mediawiki
+    label: str = ""
+    site: str = ""            # stackexchange: es. stackoverflow, unix, askubuntu, it.stackoverflow
+    api: str = ""             # mediawiki: es. https://wiki.archlinux.org/api.php
+    host: str = ""
+
+
+@dataclass
+class SearchConfig:
+    enabled: bool = False
+    timeout: float = 8.0
+    cache_minutes: float = 60.0
+    max_results: int = 3
+    min_query_length: int = 3
+    only_answered: bool = True
+    stackexchange_key: str = ""
+    providers: list[SearchProvider] = field(default_factory=list)
+    texts: dict[str, str] = field(default_factory=lambda: dict(SEARCH_TEXTS))
+
+
+DEFAULT_PROVIDERS = [
+    {"name": "unix", "type": "stackexchange", "site": "unix", "label": "unix.SE"},
+    {"name": "so", "type": "stackexchange", "site": "stackoverflow", "label": "SO"},
+    {"name": "askubuntu", "type": "stackexchange", "site": "askubuntu", "label": "AskUbuntu"},
+    {"name": "archwiki", "type": "mediawiki", "api": "https://wiki.archlinux.org/api.php", "label": "ArchWiki"},
+]
+
+
+def _parse_search(data: dict) -> SearchConfig:
+    sd = _section(data, "search", "")
+    _check_keys(sd, set(SearchConfig.__dataclass_fields__), "search")
+    cfg = SearchConfig(**{k: v for k, v in sd.items() if k not in ("providers", "texts")})
+    cfg.stackexchange_key = str(cfg.stackexchange_key or "")
+    providers = []
+    names = set()
+    for i, p in enumerate(_as_list(sd.get("providers")) or DEFAULT_PROVIDERS):
+        where = f"search.providers[{i}]"
+        if not isinstance(p, dict):
+            raise ConfigError(f"{where}: deve essere una mappa")
+        _check_keys(p, {"name", "type", "label", "site", "api"}, where)
+        prov = SearchProvider(name=str(p.get("name") or p.get("site") or f"p{i}"), type=str(p.get("type", "")),
+                              label=str(p.get("label") or p.get("name") or p.get("site") or ""),
+                              site=str(p.get("site", "")), api=str(p.get("api", "")))
+        if prov.type == "stackexchange":
+            if not prov.site:
+                raise ConfigError(f"{where}: per stackexchange serve 'site' (es. stackoverflow, unix)")
+            prov.host = SE_HOSTS.get(prov.site, f"{prov.site}.stackexchange.com")
+        elif prov.type == "mediawiki":
+            if not prov.api.startswith(("https://", "http://")):
+                raise ConfigError(f"{where}: per mediawiki serve 'api' (URL di api.php)")
+        else:
+            raise ConfigError(f"{where}.type: deve essere 'stackexchange' o 'mediawiki'")
+        if prov.name in names:
+            raise ConfigError(f"{where}: nome '{prov.name}' duplicato")
+        names.add(prov.name)
+        providers.append(prov)
+    cfg.providers = providers
+    texts = _section(sd, "texts", "search.")
+    _check_keys(texts, set(SEARCH_TEXTS), "search.texts")
+    cfg.texts = {**SEARCH_TEXTS, **{k: str(v) for k, v in texts.items()}}
+    return cfg
+
+
+KARMA_TEXTS = {
+    "changed": "{target} ha ora {points} karma ({sign}1 da {nick})",
+    "self": "{nick}: il karma non si dà da soli ;)",
+    "bot": "Grazie {nick}, ma io non gioco: il karma è per gli umani.",
+    "cooldown": "Hai già dato karma a {target} da poco: riprova fra {wait}.",
+    "daily_limit": "Per oggi hai già dato {limit} punti karma, riprova domani.",
+    "show": "{target} ha {points} karma (+{plus}/-{minus}){rank}.",
+    "show_rank": ", {rank}° su {total}{where}",
+    "show_none": "{target} non ha ancora punti karma.",
+    "top": "Classifica karma{where}: {list}",
+    "top_item": "{pos}. {nick} ({score})",
+    "top_empty": "Nessuno ha ancora punti karma{where}.",
+    "reset": "Karma di {target} azzerato (era {old}).",
+    "reset_none": "{target} non ha punti karma da azzerare.",
+    "reset_on_ban": "Karma di {target} azzerato per il ban (era {old}).",
+}
+
+
+@dataclass
+class KarmaConfig:
+    enabled: bool = False
+    scope: str = "channel"            # channel = classifica per canale | global = una sola per tutti
+    channels: list[str] = field(default_factory=list)  # vuoto = tutti
+    plusplus: bool = True             # riconosce "nick++" e "nick--" nei messaggi
+    allow_negative: bool = True       # permette "nick--"
+    require_present: bool = True      # il destinatario deve essere nel canale (evita c++, g++, i++...)
+    ignore_words: list[str] = field(default_factory=lambda: ["c", "g", "i", "j", "k", "n", "x", "y"])
+    max_per_message: int = 3
+    cooldown: float = 3600.0          # stesso donatore -> stesso destinatario
+    daily_limit: int = 20             # punti che un utente può dare in 24 ore
+    reset_on_ban: bool = True         # il karma si azzera quando l'utente viene bannato
+    announce: bool = True             # annuncia nel canale ogni cambio
+    announce_reset: bool = False      # annuncia l'azzeramento per ban
+    top_size: int = 10
+    texts: dict[str, str] = field(default_factory=lambda: dict(KARMA_TEXTS))
+
+
+def _parse_karma(data: dict) -> KarmaConfig:
+    kd = _section(data, "karma", "")
+    _check_keys(kd, set(KarmaConfig.__dataclass_fields__), "karma")
+    cfg = KarmaConfig(**{k: v for k, v in kd.items() if k != "texts"})
+    cfg.scope = str(cfg.scope).lower()
+    if cfg.scope not in ("channel", "global"):
+        raise ConfigError("karma.scope: deve essere 'channel' o 'global'")
+    cfg.channels = [str(c) for c in _as_list(cfg.channels)]
+    cfg.ignore_words = [str(w).lower() for w in _as_list(cfg.ignore_words)]
+    texts = _section(kd, "texts", "karma.")
+    _check_keys(texts, set(KARMA_TEXTS), "karma.texts")
+    cfg.texts = {**KARMA_TEXTS, **{k: str(v) for k, v in texts.items()}}
     return cfg
 
 
@@ -503,6 +650,7 @@ class CommandConfig:
     cooldown: float = 0.0
     hidden: bool = False
     enabled: bool = True
+    args_pattern: str = ""  # regex che gli argomenti devono rispettare (es. '^\\d+$'), altrimenti "Uso: ..."
     details: list[str] = field(default_factory=list)   # spiegazione estesa (una riga per elemento)
     examples: list[str] = field(default_factory=list)  # esempi d'uso, es. "!man ls"
 
@@ -525,6 +673,8 @@ class Config:
     bans: BansConfig = field(default_factory=lambda: BansConfig())
     self_op: SelfOpConfig = field(default_factory=SelfOpConfig)
     about: AboutConfig = field(default_factory=AboutConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
+    karma: KarmaConfig = field(default_factory=KarmaConfig)
     path: Path | None = None
 
     def resolve(self, path: str) -> Path:
@@ -726,7 +876,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         raise ConfigError("il file di configurazione deve contenere una mappa YAML")
     data = _expand_env(data)
     _check_keys(data, {"server", "identity", "auth", "channels", "admins", "behavior", "variables",
-                       "greetings", "responses", "commands", "events", "logging", "memory", "bans", "self_op", "about"}, "<radice>")
+                       "greetings", "responses", "commands", "events", "logging", "memory", "bans", "self_op", "about", "search", "karma"}, "<radice>")
 
     # server
     srv = _section(data, "server", "")
@@ -929,9 +1079,15 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
             cooldown=float(c.get("cooldown", 0.0)),
             hidden=bool(c.get("hidden", False)),
             enabled=bool(c.get("enabled", True)),
+            args_pattern=str(c.get("args_pattern", "")),
             details=[str(d) for d in _as_list(c.get("details"))],
             examples=[str(e) for e in _as_list(c.get("examples"))],
         )
+        if cmd.args_pattern:
+            try:
+                re.compile(cmd.args_pattern)
+            except re.error as exc:
+                raise ConfigError(f"{where}.args_pattern: regex non valida: {exc}") from None
         for key in [cmd.name, *cmd.aliases]:
             if key in seen:
                 raise ConfigError(f"{where}: '{key}' è già usato da commands.{seen[key]}")
@@ -949,7 +1105,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         server=server, identity=identity, auth=auth, channels=channels,
         admins=[str(a) for a in _as_list(data.get("admins"))], behavior=behavior,
         variables=variables, greetings=greetings, responses=responses, commands=commands,
-        events=events, logging=_parse_logging(data), memory=_parse_memory(data), bans=_parse_bans(data), self_op=_parse_self_op(data), about=_parse_about(data),
+        events=events, logging=_parse_logging(data), memory=_parse_memory(data), bans=_parse_bans(data), self_op=_parse_self_op(data), about=_parse_about(data), search=_parse_search(data), karma=_parse_karma(data),
         path=path,
     )
 
