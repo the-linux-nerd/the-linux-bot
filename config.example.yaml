@@ -1,5 +1,7 @@
 # =============================================================================
-#  The Linux Bot - configurazione di esempio
+#  The Linux Bot - configurazione di esempio (contiene tutte le funzioni)
+#  Per iniziare è più semplice config.minimal.yaml con la guida in
+#  docs/configurazione.md; tutte le opzioni sono in docs/riferimento.md.
 #  Copia questo file in config.yaml e adattalo. Valida con:
 #      python -m linuxbot -c config.yaml --check
 #
@@ -344,7 +346,7 @@ bans:
   immune:                  # immuni in TUTTI i canali (gli admin del bot lo sono sempre)
     - "*!*@*.staff.example.org"
   unban_immune: true       # toglie i ban messi da altri che colpiscono un immune
-  # Tutti i testi sono personalizzabili (elenco completo delle chiavi nel README).
+  # Tutti i testi sono personalizzabili (elenco delle chiavi in docs/riferimento.md).
   texts:
     kick_reason_temp: "{reason} (bannato per {duration})"
 
@@ -372,7 +374,7 @@ memory:
     max_pending: 10            # messaggi in attesa al massimo per destinatario
     expire_days: 60            # i messaggi non consegnati scadono
   # Tutti i testi sono personalizzabili; questi sono alcuni esempi, l'elenco
-  # completo delle chiavi è nel README. Variabili: {who} {where} {what} {ago}
+  # completo delle chiavi è in docs/riferimento.md. Variabili: {who} {where} {what} {ago}
   # {when} {period} {count} {names} {recipient} {sender} {text} {max}.
   texts:
     seen: "{who} è passato {ago} ({when}) in {where}, {what}."

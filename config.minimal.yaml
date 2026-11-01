@@ -1,0 +1,53 @@
+# =============================================================================
+#  The Linux Bot - configurazione minima
+#  Il punto di partenza consigliato: connessione, identificazione, op, saluti e
+#  qualche comando. Le altre funzioni si aggiungono una alla volta copiandole da
+#  config.example.yaml (vedi docs/configurazione.md).
+#  Controllo:  python -m linuxbot -c config.yaml --check
+# =============================================================================
+
+server:
+  host: irc.example.org          # il tuo server
+  port: 6697
+  tls: true
+
+identity:
+  nick: TheLinuxBot              # deve essere registrato con NickServ
+  alt_nicks: [TheLinuxBot_]
+
+auth:
+  nickserv:
+    enabled: true
+    password: ${LINUXBOT_NICKSERV_PASSWORD}   # dalla variabile d'ambiente (file linuxbot.env)
+  # SASL, riconoscimento di Anope/Atheme e recupero del nick sono automatici.
+
+channels:
+  - name: "#linux"
+
+admins:
+  - "*!*@user/il-tuo-cloak"      # tu: la maschera la vedi con /whois tuonick
+
+self_op:
+  enabled: true                  # chiede l'op a ChanServ se non glielo dà da solo
+
+behavior:
+  timezone: Europe/Rome
+
+greetings:
+  enabled: true
+  messages:
+    - "Ciao {nick}, benvenuto su {channel}! Scrivi {prefix}help per vedere cosa so fare."
+
+commands:
+  help:
+    aliases: [aiuto]
+    description: "Elenca i comandi o spiega come si usa uno"
+    usage: "[comando]"
+    actions: [help]
+  ping:
+    description: "Verifica che il bot sia vivo"
+    reply: "pong, {nick}!"
+  reload:
+    description: "Ricarica la configurazione"
+    permission: admin
+    actions: [reload]

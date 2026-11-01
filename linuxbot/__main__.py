@@ -71,9 +71,12 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     if args.check:
-        print(f"Configurazione valida: {len(config.commands)} comandi, {len(config.responses)} risposte, "
-              f"{len(config.channels)} canali.")
-        print(f"Database: {config.database_path.expanduser().resolve()}")
+        def n(count: int, one: str, many: str) -> str:
+            return f"{count} {one if count == 1 else many}"
+        print(f"Configurazione valida: {n(len(config.commands), 'comando', 'comandi')}, "
+              f"{n(len(config.responses), 'risposta', 'risposte')}, {n(len(config.channels), 'canale', 'canali')}.")
+        if config.memory.enabled or config.bans.enabled or config.karma.enabled or config.schedules:
+            print(f"Database: {config.database_path.expanduser().resolve()}")
         return 0
 
     try:

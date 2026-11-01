@@ -129,8 +129,8 @@ user_install() {
             say "Uso la tua configurazione esistente: $REPO/config.yaml -> $conf"
             run cp "$REPO/config.yaml" "$conf"
         else
-            say "Creo $conf dalla configurazione d'esempio (da personalizzare!)"
-            run cp "$REPO/config.example.yaml" "$conf"
+            say "Creo $conf dalla configurazione minima (da personalizzare: vedi docs/configurazione.md)"
+            run cp "$REPO/config.minimal.yaml" "$conf"
         fi
         run chmod 600 "$conf"
     fi
@@ -220,8 +220,8 @@ system_install() {
             say "Uso la tua configurazione esistente: $REPO/config.yaml -> $conf"
             run cp "$REPO/config.yaml" "$conf"
         else
-            say "Creo $conf dalla configurazione d'esempio (da personalizzare!)"
-            run cp "$REPO/config.example.yaml" "$conf"
+            say "Creo $conf dalla configurazione minima (da personalizzare: vedi docs/configurazione.md)"
+            run cp "$REPO/config.minimal.yaml" "$conf"
         fi
     fi
     run chown root:linuxbot "$conf_dir" "$conf"
