@@ -25,7 +25,7 @@ def expected_options() -> set[str]:
         "auth.sasl": (fields(c.SaslConfig) - {"mode"}) | {"enabled"},
         "auth.nickserv": fields(c.NickServConfig),
         "auth.oper": fields(c.OperConfig),
-        "channels[]": fields(c.ChannelConfig, {"managed", "template"}),
+        "channels[]": fields(c.ChannelConfig, {"managed", "template", "expires"}),  # interni, non opzioni
         "channel_management": fields(c.ChannelManagementConfig),
         "behavior": fields(c.BehaviorConfig) | {"command_prefix"},
         "greetings": fields(c.GreetingsConfig),

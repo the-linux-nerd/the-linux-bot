@@ -85,7 +85,9 @@ CREATE TABLE IF NOT EXISTS managed_channels (
     chan_key   TEXT NOT NULL DEFAULT '',
     created_by TEXT NOT NULL DEFAULT '',
     registered INTEGER NOT NULL DEFAULT 0,
-    ts         REAL NOT NULL
+    ts         REAL NOT NULL,
+    expires    REAL,                       -- canali temporanei: quando chiudere (NULL = permanente)
+    warned     INTEGER NOT NULL DEFAULT 0  -- avviso di chiusura già dato
 );
 CREATE TABLE IF NOT EXISTS state (
     key     TEXT PRIMARY KEY,       -- es. "schedule:karma-mezzanotte", "youtube:@the-linux-nerd"
@@ -184,7 +186,16 @@ class Memory:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA synchronous=FULL")  # ogni scrittura è su disco anche se il PC si spegne di colpo
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.commit()
+
+    def _migrate(self) -> None:
+        """Aggiunge le colonne nate nelle versioni successive ai database già esistenti."""
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(managed_channels)")}
+        if "expires" not in columns:
+            self.db.execute("ALTER TABLE managed_channels ADD COLUMN expires REAL")
+        if "warned" not in columns:
+            self.db.execute("ALTER TABLE managed_channels ADD COLUMN warned INTEGER NOT NULL DEFAULT 0")
 
     def _acquire_lock(self) -> None:
         """Impedisce che due copie del bot usino lo stesso database (Linux e macOS)."""
@@ -229,9 +240,22 @@ class Memory:
     # ------------------------------------------------------------------ canali creati da IRC
 
     @_timed
-    def channel_add(self, name: str, template: str = "", key: str = "", created_by: str = "") -> None:
-        self.db.execute("INSERT OR REPLACE INTO managed_channels (name_key, name, template, chan_key, created_by, ts) "
-                        "VALUES (?, ?, ?, ?, ?, ?)", (irc_lower(name), name, template, key, created_by, self.clock()))
+    def channel_add(self, name: str, template: str = "", key: str = "", created_by: str = "",
+                    expires: float | None = None) -> None:
+        self.db.execute("INSERT OR REPLACE INTO managed_channels (name_key, name, template, chan_key, created_by, ts, "
+                        "expires) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (irc_lower(name), name, template, key, created_by, self.clock(), expires))
+        self.db.commit()
+
+    @_timed
+    def channel_set_expiry(self, name: str, expires: float | None) -> None:
+        self.db.execute("UPDATE managed_channels SET expires = ?, warned = 0 WHERE name_key = ?",
+                        (expires, irc_lower(name)))
+        self.db.commit()
+
+    @_timed
+    def channel_set_warned(self, name: str) -> None:
+        self.db.execute("UPDATE managed_channels SET warned = 1 WHERE name_key = ?", (irc_lower(name),))
         self.db.commit()
 
     @_timed
@@ -248,9 +272,10 @@ class Memory:
 
     @_timed
     def channel_list(self) -> list[dict]:
-        rows = self.db.execute("SELECT name, template, chan_key, created_by, registered, ts FROM managed_channels "
-                               "ORDER BY ts")
-        return [dict(zip(("name", "template", "key", "created_by", "registered", "ts"), r)) for r in rows]
+        cols = ("name", "template", "key", "created_by", "registered", "ts", "expires", "warned")
+        rows = self.db.execute("SELECT name, template, chan_key, created_by, registered, ts, expires, warned "
+                               "FROM managed_channels ORDER BY ts")
+        return [dict(zip(cols, r)) for r in rows]
 
     @_timed
     def summary(self) -> dict[str, int]:

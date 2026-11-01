@@ -7,18 +7,25 @@ owner vengono dal modello scelto (``channel_templates``).
 
 In IRC un canale nasce quando qualcuno ci entra e sparisce quando resta vuoto: "creare" vuol dire
 entrarci e registrarlo su ChanServ, "chiudere" vuol dire togliere la registrazione (DROP) e uscire.
+
+Un canale può essere permanente (esigenze della community) o temporaneo (un evento): i temporanei
+hanno una scadenza, ricevono un avviso prima e si chiudono da soli; ``!proroga`` la sposta o li
+rende permanenti.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from .config import channel_from_template
+from .config import ChannelConfig, channel_from_template
 from .irc import build_line, irc_lower
+from .memory import format_duration, parse_duration
+from .templates import render
 
 if TYPE_CHECKING:
     from .bot import Bot
@@ -26,10 +33,59 @@ if TYPE_CHECKING:
 log = logging.getLogger("linuxbot.channels")
 
 _DROP_CONFIRM = re.compile(r"\bDROP\s+(?P<chan>[#&]\S+)\s+(?P<token>[^\s.]+)", re.IGNORECASE)
+_PERMANENT = {"perm", "permanente", "per sempre", "sempre", "forever", "0"}
+_FILLER = re.compile(r"^(per|fino|fino al|fino alle|al|alle|il|a|entro)\s+", re.IGNORECASE)
+
+
+def parse_when(text: str, now: datetime) -> tuple[float | None, str]:
+    """Quando deve chiudere un canale: durata ("3d", "6h"), data ("15/11", "15/11 18:00",
+    "2026-11-15 18:00") o ora ("18:30", oggi o domani). Restituisce (timestamp, errore);
+    timestamp 0 = permanente, None = non valido (con il motivo)."""
+    t = " ".join(text.lower().split())
+    while _FILLER.match(t):
+        t = _FILLER.sub("", t, count=1)
+    if not t:
+        return None, "manca la durata o la data"
+    if t in _PERMANENT:
+        return 0.0, ""
+    seconds = parse_duration(t)
+    if seconds is not None:
+        return (0.0, "") if seconds == 0 else (now.timestamp() + seconds, "")
+    tz = now.tzinfo
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?:\s+(\d{1,2})[:.](\d{2}))?", t)
+    iso = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})(?:[ t](\d{1,2})[:.](\d{2}))?", t)
+    only_time = re.fullmatch(r"(\d{1,2})[:.](\d{2})", t)
+    try:
+        if m:
+            day, month = int(m.group(1)), int(m.group(2))
+            year = int(m.group(3)) if m.group(3) else now.year
+            if year < 100:
+                year += 2000
+            hour, minute = (int(m.group(4)), int(m.group(5))) if m.group(4) else (23, 59)
+            when = datetime(year, month, day, hour, minute, tzinfo=tz)
+            if not m.group(3) and when <= now:
+                when = when.replace(year=year + 1)  # "15/01" a dicembre: l'anno prossimo
+        elif iso:
+            hour, minute = (int(iso.group(4)), int(iso.group(5))) if iso.group(4) else (23, 59)
+            when = datetime(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)), hour, minute, tzinfo=tz)
+        elif only_time:
+            when = now.replace(hour=int(only_time.group(1)), minute=int(only_time.group(2)), second=0, microsecond=0)
+            if when <= now:
+                when += timedelta(days=1)
+        else:
+            return None, f"non capisco \"{text.strip()}\" (es. 3d, 6h, 15/11, 15/11 18:00, perm)"
+    except ValueError:
+        return None, f"data non valida: {text.strip()}"
+    if when <= now:
+        return None, f"{when.strftime('%d/%m/%Y %H:%M')} è già passato"
+    return when.timestamp(), ""
+
+
 _REGISTERED = re.compile(r"(?i)(is now registered|registered to|has been registered|now registered|registrat)")
 
 
 class ChannelAdminMixin:
+    EXPIRY_CHECK = 30.0  # secondi fra un controllo delle scadenze e l'altro
     _pending_register: set[str]
     _pending_drop: dict[str, float]
     _close_requests: dict[tuple[str, str], float]
@@ -49,8 +105,17 @@ class ChannelAdminMixin:
                 log.warning("Il canale %s usa il modello '%s', che non esiste più: lo gestisco senza modello",
                             row["name"], row["template"])
             cfg = channel_from_template(row["name"], template or {}, row["key"])
-            cfg.managed, cfg.template = True, row["template"]
+            cfg.managed, cfg.template, cfg.expires = True, row["template"], row["expires"]
             self.config.channels.append(cfg)
+
+    def expiry_texts(self: "Bot", cfg: ChannelConfig) -> dict[str, str]:
+        """Variabili {expires} ("15/11/2026 18:00") e {expires_in} ("fra 2 giorni") di un canale."""
+        if not cfg.expires:
+            return {"expires": "", "expires_in": ""}
+        tz = self.now_local().tzinfo
+        when = datetime.fromtimestamp(cfg.expires, tz).strftime("%d/%m/%Y %H:%M")
+        remaining = cfg.expires - self.wallclock()
+        return {"expires": when, "expires_in": f"fra {format_duration(remaining)}" if remaining > 60 else "a momenti"}
 
     def _is_static(self: "Bot", channel: str) -> bool:
         cfg = self._channel_cfg(channel)
@@ -62,9 +127,18 @@ class ChannelAdminMixin:
         opts = value if isinstance(value, dict) else {}
         mgmt = self.config.channel_management
         name = self._r(opts.get("channel", "{arg1}"), ctx).strip()
-        template = (self._r(opts.get("template", "{arg2}"), ctx).strip() or mgmt.default_template).lower()
         key = self._r(opts.get("key", ""), ctx).strip()
         reply = lambda text: self.notice(ctx.get("nick") or ctx["_target"], text)  # noqa: E731
+        temporary = bool(opts.get("temporary"))  # !evento: la scadenza è obbligatoria
+        # "spec": il resto della riga, es. "evento 3d" o "15/11 18:00 privato": modello e scadenza
+        spec_words = self._r(opts.get("spec", ""), ctx).split()
+        template = self._r(opts.get("template", ""), ctx).strip().lower()
+        if not template:
+            template = next((w.lower() for w in spec_words if w.lower() in self.config.channel_templates), "")
+            spec_words = [w for w in spec_words if w.lower() != template] if template else spec_words
+        when_text = " ".join(spec_words) or self._r(opts.get("duration", ""), ctx).strip()
+        if not template:
+            template = (mgmt.event_template if temporary and mgmt.event_template else mgmt.default_template)
         if self.memory is None:
             reply("Per creare canali serve il database (memory.enabled, bans.enabled o karma.enabled).")
             return
@@ -83,9 +157,24 @@ class ChannelAdminMixin:
         if len(managed) >= mgmt.max_channels:
             reply(f"Ho già {len(managed)} canali creati (massimo {mgmt.max_channels}): chiudine qualcuno.")
             return
-        cfg = channel_from_template(name, self.config.channel_templates.get(template, {}), key)
-        cfg.managed, cfg.template = True, template
-        self.memory.channel_add(name, template, key, ctx.get("nick", ""))
+        tpl = self.config.channel_templates.get(template, {})
+        expires: float | None = None
+        if when_text:
+            ts, error = parse_when(when_text, self.now_local())
+            if ts is None:
+                reply(f"Scadenza non valida: {error}.")
+                return
+            expires = ts or None
+        elif tpl.get("duration") is not None:
+            ts, _ = parse_when(str(tpl["duration"]), self.now_local())
+            expires = ts or None
+        if temporary and expires is None:
+            reply("Per un canale temporaneo indica quando chiude, es. !evento #hackathon 3d o "
+                  "!evento #hackathon 15/11 18:00")
+            return
+        cfg = channel_from_template(name, tpl, key)
+        cfg.managed, cfg.template, cfg.expires = True, template, expires
+        self.memory.channel_add(name, template, key, ctx.get("nick", ""), expires)
         self.config.channels.append(cfg)
         if mgmt.register:
             self._pending_register.add(irc_lower(name))
@@ -96,8 +185,12 @@ class ChannelAdminMixin:
             steps.append("lo registro su ChanServ")
         if cfg.topic is not None or cfg.modes or cfg.description is not None:
             steps.append("imposto topic, modi e descrizione del modello" if template else "imposto topic e modi")
-        reply(f"Creo {name}{f' con il modello {template}' if template else ''}: {', '.join(steps)}. "
-              "Lo ricorderò anche dopo un riavvio.")
+        if expires:
+            texts = self.expiry_texts(cfg)
+            end = f"È temporaneo: chiude {texts['expires_in']} ({texts['expires']}); per spostarlo !proroga."
+        else:
+            end = "È permanente: lo ricorderò anche dopo un riavvio."
+        reply(f"Creo {name}{f' con il modello {template}' if template else ''}: {', '.join(steps)}. {end}")
 
     def _maybe_register(self: "Bot", channel: str) -> None:
         """Registra su ChanServ un canale appena creato, quando il bot ne è op ed è identificato."""
@@ -134,21 +227,85 @@ class ChannelAdminMixin:
                   f"{ctx.get('prefix', '!')}chiudi {cfg.name} conferma entro {int(mgmt.confirm_seconds)} secondi.")
             return
         self._close_requests.pop(request, None)
-        row = next((r for r in self.memory.channel_list() if irc_lower(r["name"]) == irc_lower(cfg.name)), None) \
-            if self.memory else None
+        self.close_managed_channel(cfg, f"Canale chiuso da {who}", by=who)
+        reply(f"{cfg.name} chiuso: sono uscito{' e ho chiesto a ChanServ di togliere la registrazione' if mgmt.drop else ''}. "
+              "Il canale sparisce quando esce anche l'ultimo utente.")
+
+    def close_managed_channel(self: "Bot", cfg: ChannelConfig, part_reason: str, by: str = "",
+                              farewell: bool = False) -> None:
+        """Chiude un canale creato da IRC: saluto (facoltativo), DROP su ChanServ, uscita, oblio."""
+        mgmt = self.config.channel_management
+        present = irc_lower(cfg.name) in self.channels
+        if farewell and present and mgmt.close_message:
+            self.say(cfg.name, render(mgmt.close_message, {**self._base_context(None, cfg.name)}))
         if mgmt.drop:
-            self._pending_drop[irc_lower(cfg.name)] = now
+            self._pending_drop[irc_lower(cfg.name)] = time.monotonic()
             cmd = mgmt.drop_command.replace("{channel}", cfg.name)
             self.send(build_line("PRIVMSG", self.config.self_op.service, cmd))
-        if irc_lower(cfg.name) in self.channels:
-            self.send(build_line("PART", cfg.name, f"Canale chiuso da {who}"))
+        if present:
+            self.send(build_line("PART", cfg.name, part_reason))
         if self.memory is not None:
             self.memory.channel_remove(cfg.name)
         self.config.channels = [c for c in self.config.channels if irc_lower(c.name) != irc_lower(cfg.name)]
         self._pending_register.discard(irc_lower(cfg.name))
-        log.info("Canale %s chiuso da %s%s", cfg.name, who, " (registrato)" if row and row["registered"] else "")
-        reply(f"{cfg.name} chiuso: sono uscito{' e ho chiesto a ChanServ di togliere la registrazione' if mgmt.drop else ''}. "
-              "Il canale sparisce quando esce anche l'ultimo utente.")
+        log.info("Canale %s chiuso%s", cfg.name, f" da {by}" if by else "")
+
+    # ------------------------------------------------------------------ canali temporanei
+
+    def check_channel_expiry(self: "Bot") -> list[str]:
+        """Avvisa i canali temporanei vicini alla scadenza e chiude quelli scaduti. Restituisce i chiusi."""
+        if not self.registered or self.memory is None:
+            return []
+        mgmt = self.config.channel_management
+        warn = parse_duration(mgmt.warn_before) if mgmt.warn_before else 0
+        rows = {irc_lower(r["name"]): r for r in self.memory.channel_list()}
+        now = self.wallclock()
+        closed = []
+        for cfg in [c for c in self.config.channels if c.managed and c.expires]:
+            remaining = cfg.expires - now
+            row = rows.get(irc_lower(cfg.name), {})
+            if remaining <= 0:
+                log.info("Il canale temporaneo %s è scaduto: lo chiudo", cfg.name)
+                self.close_managed_channel(cfg, "Canale temporaneo chiuso: evento terminato", farewell=True)
+                closed.append(cfg.name)
+            elif warn and remaining <= warn and not row.get("warned") and irc_lower(cfg.name) in self.channels:
+                self.say(cfg.name, render(mgmt.warn_message, self._base_context(None, cfg.name)))
+                self.memory.channel_set_warned(cfg.name)
+        return closed
+
+    async def _channel_expiry_loop(self: "Bot") -> None:
+        while True:
+            try:
+                self.check_channel_expiry()
+            except Exception:
+                log.exception("Errore controllando i canali temporanei")
+            await asyncio.sleep(self.EXPIRY_CHECK)
+
+    def _action_channel_extend(self: "Bot", value: Any, ctx: dict) -> None:
+        opts = value if isinstance(value, dict) else {}
+        name = self._r(opts.get("channel", "{arg1}"), ctx).strip()
+        when_text = self._r(opts.get("when", "{rest}"), ctx).strip()
+        reply = lambda text: self.notice(ctx.get("nick") or ctx["_target"], text)  # noqa: E731
+        cfg = self._channel_cfg(name) if name else None
+        if cfg is None or not cfg.managed:
+            reply(f"{name or 'Quel canale'} non è un canale creato da me." if name else
+                  "Indica il canale, es. !proroga #hackathon 2d")
+            return
+        ts, error = parse_when(when_text, self.now_local())
+        if ts is None:
+            reply(f"Scadenza non valida: {error}.")
+            return
+        cfg.expires = ts or None
+        if self.memory is not None:
+            self.memory.channel_set_expiry(cfg.name, cfg.expires)
+        if cfg.expires:
+            texts = self.expiry_texts(cfg)
+            reply(f"{cfg.name} ora chiude {texts['expires_in']} ({texts['expires']}).")
+            log.info("Scadenza di %s spostata al %s da %s", cfg.name, texts["expires"], ctx.get("nick"))
+        else:
+            reply(f"{cfg.name} ora è permanente.")
+            log.info("%s reso permanente da %s", cfg.name, ctx.get("nick"))
+        self.check_channel_settings(cfg.name, "scadenza cambiata")  # il topic può contenere {expires}
 
     # ------------------------------------------------------------------ risposte di ChanServ
 
@@ -183,6 +340,11 @@ class ChannelAdminMixin:
                 if cfg.template:
                     origin += f", modello {cfg.template}"
                 origin += ", registrato" if row.get("registered") else ""
+                if cfg.expires:
+                    texts = self.expiry_texts(cfg)
+                    origin += f", temporaneo: chiude {texts['expires_in']} ({texts['expires']})"
+                else:
+                    origin += ", permanente"
             else:
                 origin = "dal file"
             if chan is None:

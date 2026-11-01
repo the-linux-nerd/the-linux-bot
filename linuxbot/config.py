@@ -60,6 +60,7 @@ ACTIONS = {
     "channel_create": "crea un canale (entra, lo registra su ChanServ, applica un modello) e lo ricorda",
     "channel_close": "chiude un canale creato con channel_create (DROP su ChanServ, esce, lo dimentica)",
     "channel_list": "elenca i canali gestiti e il loro stato",
+    "channel_extend": "sposta la scadenza di un canale temporaneo o lo rende permanente",
 }
 
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -654,6 +655,10 @@ class ChannelManagementConfig:
     drop_command: str = "DROP {channel}"
     confirm_seconds: float = 60.0     # tempo per confermare !chiudi
     max_channels: int = 20            # canali creati da IRC al massimo
+    event_template: str = ""          # modello per !evento (canali temporanei)
+    warn_before: str = "1h"           # avviso nel canale temporaneo prima della chiusura ("" = niente)
+    warn_message: str = "⏰ {channel} è un canale temporaneo: chiude {expires_in} ({expires})."
+    close_message: str = "{channel} chiude adesso: grazie a tutti per aver partecipato!"
 
 
 CHANNEL_TEMPLATE_KEYS = {"key", "owners", "topic", "topic_lock", "description", "description_command",
@@ -661,22 +666,30 @@ CHANNEL_TEMPLATE_KEYS = {"key", "owners", "topic", "topic_lock", "description", 
 
 
 def _parse_channel_management(data: dict) -> tuple[ChannelManagementConfig, dict[str, dict]]:
+    from .memory import parse_duration
+
     cm = _section(data, "channel_management", "")
     _check_keys(cm, set(ChannelManagementConfig.__dataclass_fields__), "channel_management")
     cfg = ChannelManagementConfig(**cm)
+    cfg.warn_before = str(cfg.warn_before or "")
+    if cfg.warn_before and parse_duration(cfg.warn_before) is None:
+        raise ConfigError(f"channel_management.warn_before: durata non valida '{cfg.warn_before}' (es. 1h, 30m)")
     templates: dict[str, dict] = {}
     for name, tpl in _section(data, "channel_templates", "").items():
         where = f"channel_templates.{name}"
         if not isinstance(tpl, dict):
-            raise ConfigError(f"{where}: deve essere una mappa (topic, modes, description, owners...)")
-        _check_keys(tpl, CHANNEL_TEMPLATE_KEYS, where)
+            raise ConfigError(f"{where}: deve essere una mappa (topic, modes, description, owners, duration...)")
+        _check_keys(tpl, CHANNEL_TEMPLATE_KEYS | {"duration"}, where)
+        if tpl.get("duration") is not None and parse_duration(str(tpl["duration"])) is None:
+            raise ConfigError(f"{where}.duration: durata non valida '{tpl['duration']}' (es. 6h, 3d, 1w, perm)")
         # valida il modello come se fosse un canale vero
-        _parse_channel({"name": "#modello", **tpl}, where)
+        _parse_channel({"name": "#modello", **{k: v for k, v in tpl.items() if k != "duration"}}, where)
         templates[str(name).lower()] = dict(tpl)
-    if cfg.default_template and cfg.default_template.lower() not in templates:
-        raise ConfigError(f"channel_management.default_template: modello '{cfg.default_template}' non definito "
-                          "in channel_templates")
-    cfg.default_template = cfg.default_template.lower()
+    for key in ("default_template", "event_template"):
+        value = str(getattr(cfg, key) or "").lower()
+        if value and value not in templates:
+            raise ConfigError(f"channel_management.{key}: modello '{value}' non definito in channel_templates")
+        setattr(cfg, key, value)
     return cfg, templates
 
 
@@ -710,6 +723,7 @@ def _parse_channel(ch: dict, where: str) -> "ChannelConfig":
 
 
 def channel_from_template(name: str, template: dict, key: str = "") -> "ChannelConfig":
+    template = {k: v for k, v in template.items() if k != "duration"}
     data = {"name": name, **template}
     if key:
         data["key"] = key
@@ -754,6 +768,7 @@ class ChannelConfig:
     modes_lock: bool = False        # se qualcuno li cambia, il bot li rimette
     managed: bool = False           # creato con !crea (sta nel database, non nel file)
     template: str = ""              # modello usato per crearlo
+    expires: float | None = None    # canali temporanei: quando chiude (timestamp)
 
 
 @dataclass

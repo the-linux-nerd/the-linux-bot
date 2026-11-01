@@ -329,6 +329,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, Chann
         if self.config.bans.enabled:
             self._spawn(self._ban_expiry_loop(), background=True)
         self._spawn(self._scheduler_loop(), background=True)
+        self._spawn(self._channel_expiry_loop(), background=True)
 
     async def _join_channels(self, wait: float = 0.0) -> None:
         if self._identified is not None:
@@ -894,6 +895,8 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, Chann
             prefix=self.config.behavior.command_prefixes[0] if self.config.behavior.command_prefixes else "",
         )
         ctx["in_channel"] = f" di {channel}" if channel else ""
+        cfg = self._channel_cfg(channel) if channel else None
+        ctx.update(self.expiry_texts(cfg) if cfg is not None else {"expires": "", "expires_in": ""})
         ctx["_target"] = channel or nick
         return ctx
 

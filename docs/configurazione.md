@@ -154,7 +154,7 @@ Aggiungine una alla volta: copia la sezione da [`config.example.yaml`](../config
 | Karma e top ten di mezzanotte | `karma`, comandi `karma` `top`, `schedules` | [Karma](funzioni.md#karma) |
 | Ban, ban a tempo, owner immuni | `bans`, `channels[].owners`, comandi `ban` `tempban` `unban` `banlist` `baninfo` | [Ban](funzioni.md#ban) |
 | Topic, modi, descrizione dei canali | `channels[].topic`, `modes`, `description` | [Topic, modi e descrizione](funzioni.md#topic-modi-e-descrizione-del-canale) |
-| Creare canali da IRC | `channel_management`, `channel_templates`, comandi `crea` `chiudi` `canali` | [Canali](funzioni.md#canali-multipli-e-canali-creati-da-irc) |
+| Creare canali da IRC, permanenti o per un evento | `channel_management`, `channel_templates`, comandi `crea` `evento` `proroga` `chiudi` `canali` | [Canali](funzioni.md#canali-multipli-e-canali-creati-da-irc) |
 | Ricerca su Stack Overflow e YouTube | `search`, comandi `cerca` `video`, risposte "ricerca" | [Ricerca](funzioni.md#ricerca-di-risposte-tecniche) |
 | Il bot che si presenta ("chi sei?") | `about`, comando `info`, risposte "chi-sei" | [Il bot si spiega](funzioni.md#il-bot-si-spiega-agli-utenti) |
 | Attività a orari fissi, backup notturno | `schedules`, `behavior.timezone` | [Attività programmate](funzioni.md#attività-programmate) |

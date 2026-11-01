@@ -20,8 +20,9 @@ richiede Python 3.10+.
   automatica**: SASL se il server lo offre, altrimenti NickServ; riconosce Anope e Atheme da solo
   e si riprende il nick se è occupato. Può diventare IRC operator (`OPER`).
 - **Op e canali**: chiede l'op a ChanServ e lo mantiene; imposta **topic, modi e descrizione**
-  dei canali come scritto nel file; più canali, ognuno con le sue impostazioni; **crea e chiude
-  canali** da IRC (`!crea`, `!chiudi`) registrandoli su ChanServ e ricordandoli.
+  dei canali come scritto nel file; più canali, ognuno con le sue impostazioni; **crea canali** da IRC,
+  permanenti (`!crea`) o temporanei per un evento (`!evento #hackathon 3d`, che avvisano e si
+  chiudono da soli), registrandoli su ChanServ e ricordandoli.
 - **Saluti** a chi entra, con regole per maschera (auto-voice, auto-op, niente saluto ai bot).
 - **Comandi** con alias, argomenti, permessi (`anyone`, `voice`, `halfop`, `op`, `admin`) e
   cooldown; **risposte automatiche** a frasi scritte in canale (anche con regex).

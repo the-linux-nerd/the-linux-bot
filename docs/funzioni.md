@@ -499,8 +499,18 @@ risposte, op automatico, log delle chat. Memoria, ban e karma sono tenuti per ca
 
 ### Creare e chiudere canali da IRC
 
-In IRC un canale nasce quando qualcuno ci entra e sparisce quando resta vuoto. Con i comandi
-della config d'esempio (solo admin):
+In IRC un canale nasce quando qualcuno ci entra e sparisce quando resta vuoto. Il bot crea due
+tipi di canali:
+
+- **permanenti**, per le nuove esigenze della community (un canale per un linguaggio, un
+  progetto, un gruppo di lavoro): `!crea #rust`. Restano finché non li chiudi con `!chiudi`;
+- **temporanei**, per un evento (un hackathon, una live, un Linux Day): `!evento #hackathon 3d`
+  oppure `!evento #linuxday 26/10 19:00`. Il bot avvisa nel canale prima della scadenza
+  (`warn_before`, default un'ora), alla scadenza saluta, toglie la registrazione da ChanServ ed
+  esce; se il PC era spento alla scadenza lo fa appena riparte. `!proroga #hackathon 1d` sposta
+  la scadenza, `!proroga #hackathon perm` lo rende permanente (se l'evento diventa una cosa fissa).
+
+Con i comandi della config d'esempio (solo admin):
 
 ```
 <fabio> !crea #rust
@@ -509,14 +519,27 @@ della config d'esempio (solo admin):
 <fabio> !canali
 -TheLinuxBot- #linux (dal file): 42 utenti, op ✓, topic ✓, modi ✓
 -TheLinuxBot- #rust (creato da fabio il 01/11/2026, modello progetto, registrato): 1 utenti, op ✓, topic ✓, modi ✓
+<fabio> !evento #hackathon 15/11 18:00
+-TheLinuxBot- Creo #hackathon con il modello evento: entro, lo registro su ChanServ, imposto topic,
+              modi e descrizione del modello. È temporaneo: chiude fra 5 giorni e 6 ore (15/11/2026 18:00);
+              per spostarlo !proroga.
+  ... il 15/11 alle 17:00, nel canale:
+<TheLinuxBot> ⏰ #hackathon è un canale temporaneo: chiude fra 1 ora (15/11/2026 18:00).
+  ... alle 18:00:
+<TheLinuxBot> #hackathon chiude adesso: grazie a tutti per aver partecipato!
 <fabio> !chiudi #rust
 -TheLinuxBot- Sicuro? Esco da #rust e tolgo la registrazione da ChanServ. Per confermare scrivi
               !chiudi #rust conferma entro 60 secondi.
 ```
 
-- **`!crea #canale [modello]`**: il bot entra (se il canale non esisteva ne diventa op), lo
-  registra su ChanServ appena è op e identificato, e applica topic, modi, descrizione e owner del
-  modello scelto in `channel_templates` (o di `channel_management.default_template`).
+- **`!crea #canale [modello] [scadenza]`** ed **`!evento #canale <scadenza> [modello]`**: il bot
+  entra (se il canale non esisteva ne diventa op), lo registra su ChanServ appena è op e
+  identificato, e applica topic, modi, descrizione e owner del modello scelto in
+  `channel_templates` (altrimenti `default_template`, o `event_template` per `!evento`).
+- **Scadenze**: una durata (`6h`, `3d`, `1w`), una data (`15/11`, `15/11 18:00`,
+  `2026-11-15 18:00`) o un'ora (`18:30`). Un modello può avere una durata predefinita
+  (`duration: 1d`): i canali creati con quel modello nascono temporanei. Nel topic, `{expires}`
+  mostra quando chiude e si aggiorna con `!proroga`.
 - **Memoria**: i canali creati stanno nel database e, a ogni avvio o `!reload`, si aggiungono a
   quelli del file. Per il resto del bot sono canali come gli altri.
 - **`!chiudi #canale`**: chiede conferma, poi toglie la registrazione da ChanServ (`DROP`; se
@@ -530,6 +553,8 @@ della config d'esempio (solo admin):
 ```yaml
 channel_management:
   default_template: progetto
+  event_template: evento
+  warn_before: 1h
   register: true
   drop: true
   max_channels: 20
@@ -538,6 +563,10 @@ channel_templates:
     topic: "{channel} | Canale di progetto | Regole: {rules_url}"
     modes: "+nt"
     owners: ["*!*@user/fabio"]
+  evento:
+    duration: 1d
+    topic: "{channel} | Canale dell'evento, aperto fino al {expires}"
+    modes: "+nt"
 ```
 
 ## Attività programmate

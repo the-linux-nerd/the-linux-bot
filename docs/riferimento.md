@@ -91,8 +91,9 @@ Lista dei canali. Un elemento può essere solo il nome (`"#linux"`) o una mappa:
 
 ## channel_management e channel_templates
 
-Canali creati con `!crea` (azione `channel_create`): stanno nel database e si aggiungono a
-`channels` a ogni avvio.
+Canali creati da IRC (azione `channel_create`, comandi `!crea` ed `!evento`): stanno nel
+database e si aggiungono a `channels` a ogni avvio. Possono essere permanenti o temporanei (con
+una scadenza: avviso prima, chiusura automatica dopo).
 
 | Chiave | Tipo | Predefinito | Significato |
 |---|---|---|---|
@@ -103,7 +104,15 @@ Canali creati con `!crea` (azione `channel_create`): stanno nel database e si ag
 | `channel_management.drop_command` | testo | `DROP {channel}` | comando di cancellazione (il codice di conferma di Atheme viene gestito da solo) |
 | `channel_management.confirm_seconds` | secondi | `60` | tempo per confermare `!chiudi` |
 | `channel_management.max_channels` | numero | `20` | canali creati al massimo |
-| `channel_templates.<nome>` | mappa | — | modello: stesse chiavi di `channels[]` tranne `name` |
+| `channel_management.event_template` | testo | `default_template` | modello usato da `!evento` se non ne indica uno |
+| `channel_management.warn_before` | durata (testo) | `1h` | avviso nei canali temporanei prima della chiusura (`""` = niente) |
+| `channel_management.warn_message` | testo | `⏰ {channel} è un canale temporaneo: chiude {expires_in} ({expires}).` | testo dell'avviso |
+| `channel_management.close_message` | testo | `{channel} chiude adesso: grazie a tutti per aver partecipato!` | saluto alla chiusura automatica |
+| `channel_templates.<nome>` | mappa | — | modello: stesse chiavi di `channels[]` tranne `name`, più `duration` (durata predefinita: il canale nasce temporaneo) |
+
+Scadenze accettate da `!crea`, `!evento` e `!proroga`: una durata (`6h`, `3d`, `1w`), una data
+(`15/11`, `15/11 18:00`, `2026-11-15 18:00`; senza ora vale le 23:59, senza anno il prossimo
+15/11), un'ora (`18:30`: oggi, o domani se è già passata) o `perm` (permanente).
 
 ## admins
 
@@ -419,9 +428,10 @@ Senza indicazioni il canale è quello del messaggio e il nick quello di chi l'ha
 | `schedule_run` | `schedule_run: "{arg1}"` | `{name}` |
 | `db_backup` | `db_backup: backups` | `{directory, keep}` |
 | `channel_check` | `channel_check: "{arg1}"` | controlla topic, modi e descrizione |
-| `channel_create` | — | `{channel, template, key}` |
+| `channel_create` | — | `{channel, spec, template, duration, temporary, key}`; `spec` = "modello e/o scadenza" (es. `"{rest}"`); `temporary: true` rende obbligatoria la scadenza |
 | `channel_close` | — | `{channel, confirm}` |
 | `channel_list` | `channel_list` | stato dei canali |
+| `channel_extend` | — | `{channel, when}`: nuova scadenza o `perm` |
 
 ## Variabili nei testi
 
@@ -439,6 +449,7 @@ Senza indicazioni il canale è quello del messaggio e il nick quello di chi l'ha
 | `{target}` `{argc}` `{command}` | `{arg1}` o `{nick}`; numero di argomenti; il comando |
 | `{match}` `{group1}`... `{nome}` | risposte con regex |
 | `{schedule}` `{late}` | attività programmate |
+| `{expires}` `{expires_in}` | canali temporanei: "15/11/2026 18:00", "fra 2 giorni" (vuote se permanente) |
 | `{reason}` `{victim}` `{kicker}` `{old_nick}` `{new_nick}` `{topic}` | eventi |
 | le chiavi di `variables` | i tuoi valori |
 

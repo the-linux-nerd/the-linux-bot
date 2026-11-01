@@ -121,13 +121,21 @@ channels:
     modes_lock: true
 
 # -----------------------------------------------------------------------------
-# Canali creati da IRC con !crea #canale [modello]: il bot ci entra, li registra su
-# ChanServ, applica il modello e li ricorda nel database (anche dopo un riavvio).
-# !chiudi #canale (con conferma) toglie la registrazione da ChanServ ed esce.
-# I canali qui sopra (channels) restano gestiti solo dal file.
+# Canali creati da IRC: il bot ci entra, li registra su ChanServ, applica un modello
+# e li ricorda nel database (anche dopo un riavvio).
+#   !crea #canale [modello]           canale permanente (nuove esigenze della community)
+#   !evento #canale <durata|data>     canale temporaneo (un evento): avviso prima della
+#                                     scadenza, poi si chiude da solo
+#   !proroga #canale <durata|data|perm>   sposta la scadenza o lo rende permanente
+#   !chiudi #canale                   (con conferma) DROP su ChanServ e uscita
+# I canali della sezione "channels" restano gestiti solo dal file.
 # -----------------------------------------------------------------------------
 channel_management:
   default_template: progetto     # modello usato se !crea non ne indica uno
+  event_template: evento         # modello usato da !evento se non ne indica uno
+  warn_before: 1h                # avviso nei canali temporanei prima della chiusura ("" = niente)
+  warn_message: "⏰ {channel} è un canale temporaneo: chiude {expires_in} ({expires})."
+  close_message: "{channel} chiude adesso: grazie a tutti per aver partecipato!"
   register: true                 # registra i canali creati su ChanServ
   register_command: "REGISTER {channel}"
   drop: true                     # !chiudi toglie la registrazione (DROP); se ChanServ chiede
@@ -139,6 +147,13 @@ channel_management:
 channel_templates:
   progetto:
     topic: "{channel} | Canale di progetto della community The Linux Nerd | Regole: {rules_url}"
+    modes: "+nt"
+    owners: ["*!*@the-linux-nerd.example.org"]
+  # Canale temporaneo per un evento: dura un giorno se non si indica altro.
+  # {expires} nel topic mostra quando chiude (si aggiorna con !proroga).
+  evento:
+    duration: 1d
+    topic: "{channel} | Canale dell'evento, aperto fino al {expires} | Regole: {rules_url}"
     modes: "+nt"
     owners: ["*!*@the-linux-nerd.example.org"]
   privato:
@@ -805,16 +820,39 @@ commands:
       - karma_reset: "{arg1}"
 
   crea:
-    description: "Crea un canale: ci entro, lo registro su ChanServ e applico un modello"
-    usage: "<#canale> [modello]"
+    description: "Crea un canale permanente: ci entro, lo registro su ChanServ e applico un modello"
+    usage: "<#canale> [modello] [scadenza]"
     permission: admin
     min_args: 1
     details:
-      - "Modelli disponibili: quelli in channel_templates (es. progetto, privato)."
+      - "Modelli disponibili: quelli in channel_templates (es. progetto, privato, evento)."
       - "Il canale resta nella mia memoria: ci rientro anche dopo un riavvio. Per toglierlo: !chiudi."
+      - "Con una scadenza (es. 3d, 15/11 18:00) diventa temporaneo: vedi !evento."
     examples: ["{prefix}crea #rust", "{prefix}crea #staff-segreto privato"]
     actions:
-      - channel_create: { channel: "{arg1}", template: "{arg2}" }
+      - channel_create: { channel: "{arg1}", spec: "{rest}" }
+
+  evento:
+    description: "Crea un canale temporaneo per un evento: avvisa prima della scadenza e si chiude da solo"
+    usage: "<#canale> <durata|data> [modello]"
+    permission: admin
+    min_args: 2
+    details:
+      - "Scadenza come durata (6h, 3d, 1w) o come data (15/11, 15/11 18:00, 2026-11-15 18:00)."
+      - "Un'ora prima avviso nel canale; alla scadenza saluto, tolgo la registrazione da ChanServ ed esco."
+      - "Per spostare la scadenza o renderlo permanente: !proroga."
+    examples: ["{prefix}evento #hackathon 3d", "{prefix}evento #linuxday 26/10 19:00", "{prefix}evento #live 2h"]
+    actions:
+      - channel_create: { channel: "{arg1}", spec: "{rest}", temporary: true }
+
+  proroga:
+    description: "Sposta la scadenza di un canale temporaneo, o lo rende permanente"
+    usage: "<#canale> <durata|data|perm>"
+    permission: admin
+    min_args: 2
+    examples: ["{prefix}proroga #hackathon 1d", "{prefix}proroga #hackathon 20/11 12:00", "{prefix}proroga #hackathon perm"]
+    actions:
+      - channel_extend: { channel: "{arg1}", when: "{rest}" }
 
   chiudi:
     description: "Chiude un canale creato con !crea (chiede conferma)"
