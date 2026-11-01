@@ -129,6 +129,16 @@ def validate_actions(actions: Any, path: str) -> list[dict]:
     return result
 
 
+def _sasl_mode(value: Any) -> str:
+    if value is True or str(value).lower() in ("yes", "true", "on", "si", "sì"):
+        return "yes"
+    if value is False or value is None or str(value).lower() in ("no", "false", "off"):
+        return "no"
+    if str(value).lower() == "auto":
+        return "auto"
+    raise ConfigError("auth.sasl.enabled: deve essere true, false o auto")
+
+
 def _permission(value: Any, path: str) -> str:
     value = str(value or "anyone").lower()
     if value not in PERMISSIONS:
@@ -160,9 +170,13 @@ class IdentityConfig:
 
 @dataclass
 class SaslConfig:
-    enabled: bool = False
+    mode: str = "no"      # yes | no | auto (usa SASL se il server lo offre, con la password di NickServ)
     username: str = ""
     password: str = ""
+
+    @property
+    def enabled(self) -> bool:
+        return self.mode != "no" and bool(self.password)
 
 
 @dataclass
@@ -170,7 +184,12 @@ class NickServConfig:
     enabled: bool = False
     password: str = ""
     service: str = "NickServ"
-    command: str = "IDENTIFY {password}"
+    command: str = "auto"   # auto = "IDENTIFY {password}" se il nick è quello dell'account, altrimenti
+                            # "IDENTIFY {account} {password}"; oppure un testo a piacere
+    account: str = ""       # account registrato (default: identity.nick)
+    services: str = "auto"  # auto (chiede la versione a NickServ) | anope | atheme | other
+    regain: bool = True     # se il nick principale è occupato, se lo riprende dopo l'identificazione
+    regain_commands: list[str] = field(default_factory=list)  # comandi personalizzati, provati in ordine
     wait: float = 15.0  # attesa massima della conferma prima di entrare comunque nei canali
     wait_for_login: bool = True  # entra nei canali solo dopo la conferma di NickServ
     success_pattern: str = (r"(?i)(you are now (identified|logged in)|password accepted|now recognized|"
@@ -1012,7 +1031,8 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
     _check_keys(sasl_d, {"enabled", "username", "password"}, "auth.sasl")
     ns_d = _section(auth_d, "nickserv", "auth.")
     _check_keys(ns_d, {"enabled", "password", "service", "command", "wait", "wait_for_login",
-                       "success_pattern", "failure_pattern"}, "auth.nickserv")
+                       "success_pattern", "failure_pattern", "account", "services", "regain", "regain_commands"},
+                "auth.nickserv")
     ns_defaults = NickServConfig()
     for key in ("success_pattern", "failure_pattern"):
         try:
@@ -1023,15 +1043,20 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
     _check_keys(op_d, {"enabled", "name", "password"}, "auth.oper")
     auth = AuthConfig(
         sasl=SaslConfig(
-            enabled=bool(sasl_d.get("enabled", False)),
-            username=str(sasl_d.get("username") or identity.nick),
-            password=str(sasl_d.get("password") or ""),
+            mode=_sasl_mode(sasl_d.get("enabled", "auto")),
+            username=str(sasl_d.get("username") or ns_d.get("account") or identity.nick),
+            # in modalità auto, senza password propria usa quella di NickServ
+            password=str(sasl_d.get("password") or (ns_d.get("password") if ns_d.get("enabled") else "") or ""),
         ),
         nickserv=NickServConfig(
             enabled=bool(ns_d.get("enabled", False)),
             password=str(ns_d.get("password") or ""),
             service=str(ns_d.get("service", "NickServ")),
-            command=str(ns_d.get("command", "IDENTIFY {password}")),
+            command=str(ns_d.get("command", "auto")),
+            account=str(ns_d.get("account") or identity.nick),
+            services=str(ns_d.get("services", "auto")).lower(),
+            regain=bool(ns_d.get("regain", True)),
+            regain_commands=[str(c) for c in _as_list(ns_d.get("regain_commands"))],
             wait=float(ns_d.get("wait", ns_defaults.wait)),
             wait_for_login=bool(ns_d.get("wait_for_login", True)),
             success_pattern=str(ns_d.get("success_pattern", ns_defaults.success_pattern)),
@@ -1044,8 +1069,10 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         ),
         user_modes=str(auth_d.get("user_modes") or ""),
     )
-    if auth.sasl.enabled and not auth.sasl.password:
-        raise ConfigError("auth.sasl.password è obbligatoria se SASL è abilitato")
+    if auth.sasl.mode == "yes" and not auth.sasl.password:
+        raise ConfigError("auth.sasl.password (o auth.nickserv.password) è obbligatoria se SASL è abilitato")
+    if auth.nickserv.services not in ("auto", "anope", "atheme", "other"):
+        raise ConfigError("auth.nickserv.services: deve essere auto, anope, atheme o other")
     if auth.oper.enabled and not auth.oper.password:
         raise ConfigError("auth.oper.password è obbligatoria se oper è abilitato")
     if auth.nickserv.enabled and not auth.nickserv.password:

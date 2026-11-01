@@ -41,20 +41,30 @@ identity:
 # Autenticazione. Puoi abilitare uno o più metodi insieme.
 # -----------------------------------------------------------------------------
 auth:
-  # SASL PLAIN: autenticazione con i services prima ancora della registrazione.
+  # Non serve sapere se il server usa Anope o Atheme: il bot lo scopre da solo.
+  # 1) Se il server offre SASL, si identifica lì (con la password di NickServ)
+  #    già durante la connessione: funziona anche se ha dovuto usare un nick alternativo.
+  # 2) Altrimenti manda a NickServ "IDENTIFY <account> <password>".
+  # 3) Chiede la versione a NickServ per riconoscere Anope o Atheme e, se il nick
+  #    principale era occupato, se lo riprende (REGAIN su Atheme, RECOVER su Anope;
+  #    con services sconosciuti prova REGAIN, RECOVER e GHOST). Se poi il nick si
+  #    libera (chi lo usava esce), lo riprende subito.
   sasl:
-    enabled: false
-    username: TheLinuxBot
-    password: ${LINUXBOT_SASL_PASSWORD:-}
+    enabled: auto            # auto | true | false
+    username: TheLinuxBot    # account; default: nickserv.account o identity.nick
+    password: ${LINUXBOT_SASL_PASSWORD:-}   # vuota = usa quella di NickServ
 
-  # Identificazione classica con NickServ dopo la connessione.
   nickserv:
     enabled: true
     service: NickServ
-    command: "IDENTIFY {password}"   # alcuni services vogliono "IDENTIFY {botnick} {password}"
+    account: TheLinuxBot     # account registrato (default: identity.nick)
     password: ${LINUXBOT_NICKSERV_PASSWORD:-cambiami}
-    # Il bot entra nei canali solo dopo la conferma di NickServ, così ChanServ lo
-    # riconosce subito e gli dà l'op. "wait" è l'attesa massima: poi entra comunque.
+    command: auto            # oppure un testo, es. "IDENTIFY {account} {password}"
+    services: auto           # auto | anope | atheme | other
+    regain: true             # riprendersi il nick principale se è occupato
+    # regain_commands: ["GHOST {nick} {password}"]   # per services particolari
+    # Il bot entra nei canali solo dopo la conferma (e dopo aver ripreso il nick),
+    # così ChanServ lo riconosce subito e gli dà l'op. "wait" è l'attesa massima.
     wait_for_login: true
     wait: 15
     # Frasi (regex) con cui i services confermano o rifiutano l'identificazione.

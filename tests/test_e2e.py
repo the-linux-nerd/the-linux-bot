@@ -71,5 +71,45 @@ class EndToEndTest(unittest.IsolatedAsyncioTestCase):
             await server.wait_closed()
 
 
+    async def test_nick_taken_identify_and_regain(self):
+        ircd = FakeIRCd()
+        server = await asyncio.start_server(ircd.handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        config = parse_config({
+            "server": {"host": "127.0.0.1", "port": port},
+            "identity": {"nick": "Bot", "alt_nicks": ["Bot_"]},
+            "auth": {"nickserv": {"enabled": True, "password": "segreta"}},
+            "channels": ["#linux"],
+            "behavior": {"flood_rate": 0.01},
+        })
+        bot = Bot(config)
+        task = asyncio.create_task(bot.run())
+        try:
+            self.assertEqual(await ircd.expect("CAP LS"), "CAP LS 302")
+            await ircd.expect("NICK Bot")
+            ircd.send(":srv CAP * LS :away-notify")          # niente SASL su questo server
+            await ircd.expect("CAP END")
+            ircd.send(":srv 433 * Bot :Nickname is already in use")
+            self.assertEqual(await ircd.expect("NICK"), "NICK Bot_")
+            ircd.send(":srv 001 Bot_ :Welcome")
+            ircd.send(":srv 376 Bot_ :End of MOTD")
+            self.assertEqual(await ircd.expect("PRIVMSG NickServ :IDENTIFY"), "PRIVMSG NickServ :IDENTIFY Bot segreta")
+            ircd.send(":NickServ!s@services NOTICE Bot_ :\x01VERSION atheme-7.2.12\x01")
+            ircd.send(":NickServ!s@services NOTICE Bot_ :You are now identified for Bot.")
+            self.assertEqual(await ircd.expect("PRIVMSG NickServ :REGAIN"), "PRIVMSG NickServ :REGAIN Bot segreta")
+            ircd.send(":NickServ!s@services NOTICE Bot_ :Bot has been regained.")
+            self.assertEqual(await ircd.expect("NICK"), "NICK Bot")
+            ircd.send(":Bot_!b@h NICK :Bot")
+            self.assertEqual(await ircd.expect("JOIN"), "JOIN #linux")
+            self.assertEqual(bot.nick, "Bot")
+        finally:
+            bot.stop()
+            task.cancel()
+            if ircd.writer is not None:
+                ircd.writer.close()
+            server.close()
+            await asyncio.wait_for(server.wait_closed(), 5)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -89,6 +89,26 @@ Ci sono due significati di "operatore", e il bot li gestisce entrambi:
        - say: { to: "#linux-staff", text: "{nick} mi ha tolto l'op in {channel}" }
    ```
 
+## Identificazione e nick occupato
+
+Non serve sapere quali services usa il server (Anope, Atheme...): il bot si regola da solo.
+
+1. **SASL automatico** (`auth.sasl.enabled: auto`, il default): se il server offre SASL PLAIN,
+   il bot si identifica già durante la connessione con l'account e la password di NickServ.
+   SASL identifica l'account, non il nick, quindi funziona anche con un nick alternativo. Se il
+   server non lo offre o SASL fallisce, si passa a NickServ.
+2. **NickServ**: con `command: auto` manda `IDENTIFY <password>` se ha il nick dell'account,
+   altrimenti `IDENTIFY <account> <password>` (accettato da Anope e Atheme da qualunque nick).
+3. **Riconoscimento dei services**: chiede la versione a NickServ (CTCP VERSION) e la scrive nel
+   log (`Services: atheme (atheme-7.2.12)`). Si può anche fissare con `services: anope|atheme`.
+4. **Nick occupato** (tipico dopo una caduta della connessione, quando il server tiene ancora il
+   vecchio collegamento): dopo l'identificazione il bot se lo riprende con `REGAIN` (Atheme) o
+   `RECOVER` (Anope); con services sconosciuti prova `REGAIN`, `RECOVER` e `GHOST`, passando al
+   successivo se NickServ risponde "comando sconosciuto". Entra nei canali solo dopo, così
+   ChanServ gli dà l'op. Se non ci riesce resta col nick alternativo e si riprende quello
+   principale appena chi lo usa esce o cambia nick. `regain_commands` permette di indicare
+   comandi propri, `regain: false` disattiva il recupero.
+
 ## Il bot si spiega agli utenti
 
 Se gli si chiede chi è o come funziona, il bot risponde con una presentazione (`about.intro`)

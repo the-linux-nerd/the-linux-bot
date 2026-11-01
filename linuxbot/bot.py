@@ -20,6 +20,7 @@ from .bans import BanMixin
 from .chatlog import ChatLog
 from .karma import KarmaMixin
 from .scheduler import SchedulerMixin
+from .services import ServicesMixin
 from .search import Searcher, http_get
 from .stats import Stats
 from .config import Config, CommandConfig, ConfigError, ResponseConfig, load_config
@@ -50,7 +51,7 @@ class Channel:
     topic: str = ""
 
 
-class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
+class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin):
     def __init__(self, config: Config, clock: Callable[[], float] = time.monotonic,
                  wallclock: Callable[[], float] = time.time):
         self.config = config
@@ -66,6 +67,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
         self._banlist_buffer: dict = {}
         self._schedule_last: dict[str, dict] = {}
         self._op_tasks: dict[str, asyncio.Task] = {}
+        self._reset_services()
         self._identified: asyncio.Event | None = None
         self._ban_resync: dict = {}
         self._open_memory()
@@ -221,6 +223,16 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
         self._sasl_in_progress = False
         self._identified = None
         self._op_tasks.clear()
+        self._reset_services()
+
+    def _reset_services(self) -> None:
+        self.services_kind, self.services_version = "", ""
+        self._logged_in = False
+        self._sasl_ok = False
+        self._regain_task = None
+        self._services_known = None
+        self._nickserv_notices = []
+        self._last_nick_try = 0.0
 
     # ------------------------------------------------------------------ registrazione e auth
 
@@ -247,11 +259,15 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
         if sub == "LS":
             if len(msg.params) > 3 and msg.params[2] == "*":
                 return  # LS multi-riga, aspettiamo l'ultima
-            names = {c.split("=")[0] for c in caps}
-            if "sasl" in names and self._sasl_in_progress:
+            offered = {c.split("=")[0]: (c.split("=", 1)[1] if "=" in c else "") for c in caps}
+            mechanisms = offered.get("sasl", "")
+            if "sasl" in offered and self._sasl_in_progress and (not mechanisms or "PLAIN" in mechanisms.split(",")):
                 self.send("CAP REQ :sasl", priority=True)
             else:
-                log_auth.error("Il server non supporta SASL")
+                if self.config.auth.sasl.mode == "yes":
+                    log_auth.error("Il server non supporta SASL PLAIN")
+                else:
+                    log_auth.info("Il server non offre SASL: mi identifico con %s", self.config.auth.nickserv.service)
                 self._end_cap()
         elif sub == "ACK" and "sasl" in caps:
             self.send("AUTHENTICATE PLAIN", priority=True)
@@ -286,13 +302,11 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
         if auth.user_modes:
             self.send(build_line("MODE", self.nick, auth.user_modes))
         wait = 0.0
-        if auth.nickserv.enabled:
-            cmd = render(auth.nickserv.command, {"password": auth.nickserv.password, "nick": self.nick,
-                                                 "botnick": self.nick})
-            self.send(build_line("PRIVMSG", auth.nickserv.service, cmd), priority=True)
+        if auth.nickserv.enabled and not self._sasl_ok:
             wait = auth.nickserv.wait
             # wait <= 0: non aspettare la conferma
             self._identified = asyncio.Event() if auth.nickserv.wait_for_login and wait > 0 else None
+        self._services_start()  # IDENTIFY (se SASL non l'ha già fatto), versione dei services, nick
         self.run_event("connect", self._base_context())
         self._spawn(self._join_channels(wait))
         if self.config.bans.enabled:
@@ -311,6 +325,12 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
                                      self.config.auth.nickserv.service, wait)
         elif wait:
             await asyncio.sleep(wait)
+        if self._regain_task is not None and not self._regain_task.done():
+            # prima di entrare si riprende il nick principale (ChanServ dà l'op a quello)
+            try:
+                await asyncio.wait_for(asyncio.shield(self._regain_task), timeout=15)
+            except asyncio.TimeoutError:
+                pass
         for ch in self.config.channels:
             if irc_lower(ch.name) not in self.channels:
                 self.send(build_line("JOIN", ch.name, ch.key) if ch.key else build_line("JOIN", ch.name))
@@ -354,19 +374,26 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
             log_conn.warning("Nick %s non disponibile, provo %s", self.nick, new)
             self.nick = new
             self.send(build_line("NICK", new), priority=True)
+        elif code == "421" and len(msg.params) > 1 and msg.params[1].upper() == "CAP":
+            self._sasl_in_progress = False  # server senza CAP: niente SASL, si usa NickServ
         elif code == "381":
             self.is_oper = True
             log_auth.info("Ora sono IRC operator")
         elif code in ("464", "491"):
             log_auth.error("OPER fallito: %s", msg.last)
         elif code in ("900", "903"):
-            if code == "900":  # RPL_LOGGEDIN: identificato (SASL o NickServ)
-                self._set_identified()
             if code == "903":
                 log_auth.info("Autenticazione SASL riuscita")
+                self._sasl_ok = True
                 self._end_cap()
+            elif self.registered:  # RPL_LOGGEDIN dopo la registrazione: identificato con NickServ
+                self._set_identified()
         elif code in ("902", "904", "905", "906", "908"):
-            log_auth.error("Autenticazione SASL fallita: %s", msg.last)
+            if self.config.auth.sasl.mode == "auto" and self.config.auth.nickserv.enabled:
+                log_auth.warning("SASL non riuscito (%s): mi identifico con %s", msg.last,
+                                 self.config.auth.nickserv.service)
+            else:
+                log_auth.error("Autenticazione SASL fallita: %s", msg.last)
             self._end_cap()
         elif code == "353" and len(msg.params) >= 4:  # NAMES
             chan = self.channels.get(irc_lower(msg.params[2]))
@@ -464,6 +491,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
         self.send(build_line("JOIN", channel, key) if key else build_line("JOIN", channel))
 
     def _on_quit(self, msg: Message) -> None:
+        self._nick_maybe_free(msg.nick)
         nick = irc_lower(msg.nick)
         for chan in self.channels.values():
             if chan.users.pop(nick, None) is not None:
@@ -478,6 +506,9 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
         old, new = irc_lower(msg.nick), msg.last
         if self._is_me(msg.nick):
             self.nick = new
+            log_conn.info("Ora mi chiamo %s", new)
+        else:
+            self._nick_maybe_free(msg.nick)
         for chan in self.channels.values():
             if old in chan.users:
                 chan.users[irc_lower(new)] = chan.users.pop(old)
@@ -542,6 +573,8 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
             self._chat(msg.params[0], f"-{msg.nick}- {text}")
         ns = self.config.auth.nickserv
         if irc_lower(msg.nick) == irc_lower(ns.service):
+            if self._services_notice(text):
+                return  # risposta alla richiesta di versione
             log_auth.info("%s: %s", msg.nick, text)
             if re.search(ns.success_pattern, text):
                 self._set_identified()
@@ -553,12 +586,9 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin):
             log_op.info("%s: %s", msg.nick, text)
 
     def _set_identified(self) -> None:
-        first = self._identified is None or not self._identified.is_set()
         if self._identified is not None:
             self._identified.set()
-        if first:
-            log_auth.info("Identificato con i services")
-            self.run_event("identified", self._base_context())
+        self._on_logged_in()
 
     def _on_privmsg(self, msg: Message) -> None:
         if len(msg.params) < 2 or not msg.prefix or self._is_me(msg.nick):
