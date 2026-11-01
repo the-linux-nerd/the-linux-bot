@@ -17,6 +17,7 @@ from typing import Any, Callable
 from . import __version__
 from .about import AboutMixin
 from .bans import BanMixin
+from .channeladmin import ChannelAdminMixin
 from .channelset import ChannelSettingsMixin
 from .chatlog import ChatLog
 from .karma import KarmaMixin
@@ -55,7 +56,8 @@ class Channel:
     modes_known: bool = False
 
 
-class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, ChannelSettingsMixin):
+class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, ChannelSettingsMixin,
+          ChannelAdminMixin):
     def __init__(self, config: Config, clock: Callable[[], float] = time.monotonic,
                  wallclock: Callable[[], float] = time.time):
         self.config = config
@@ -68,6 +70,9 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, Chann
         self.searcher: Searcher | None = (Searcher(config.search, state=lambda: self.memory)
                                           if config.search.enabled else None)
         self.memory: Memory | None = None
+        self._pending_register: set[str] = set()
+        self._pending_drop: dict[str, float] = {}
+        self._close_requests: dict[tuple[str, str], float] = {}
         self._banlist_buffer: dict = {}
         self._schedule_last: dict[str, dict] = {}
         self._op_tasks: dict[str, asyncio.Task] = {}
@@ -76,6 +81,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, Chann
         self._identified: asyncio.Event | None = None
         self._ban_resync: dict = {}
         self._open_memory()
+        self.merge_managed_channels()  # i canali creati con !crea, dal database
         self.nick = config.identity.nick
         self.channels: dict[str, Channel] = {}
         self.hosts: dict[str, str] = {}  # nick (lower) -> nick!user@host
@@ -616,6 +622,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, Chann
         elif irc_lower(msg.nick) == irc_lower(self.config.self_op.service):
             log_op.info("%s: %s", msg.nick, text)
             self._chanserv_notice(text)
+            self._chanadmin_notice(text)
 
     def _set_identified(self) -> None:
         if self._identified is not None:
@@ -1437,6 +1444,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, Chann
         new.data_dir = self.config.data_dir  # viene dalla riga di comando, non dal file
         self.config = new
         self._open_memory()
+        self.merge_managed_channels()
         self._open_chatlog()
         fetch = self.searcher.fetch if self.searcher is not None else http_get
         self.searcher = Searcher(new.search, fetch, state=lambda: self.memory) if new.search.enabled else None

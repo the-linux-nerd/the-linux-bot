@@ -118,6 +118,33 @@ channels:
     modes: "+nts"            # canale staff: anche segreto (non compare in /list)
     modes_lock: true
 
+# -----------------------------------------------------------------------------
+# Canali creati da IRC con !crea #canale [modello]: il bot ci entra, li registra su
+# ChanServ, applica il modello e li ricorda nel database (anche dopo un riavvio).
+# !chiudi #canale (con conferma) toglie la registrazione da ChanServ ed esce.
+# I canali qui sopra (channels) restano gestiti solo dal file.
+# -----------------------------------------------------------------------------
+channel_management:
+  default_template: progetto     # modello usato se !crea non ne indica uno
+  register: true                 # registra i canali creati su ChanServ
+  register_command: "REGISTER {channel}"
+  drop: true                     # !chiudi toglie la registrazione (DROP); se ChanServ chiede
+  drop_command: "DROP {channel}" # un codice di conferma, il bot lo manda da solo
+  confirm_seconds: 60
+  max_channels: 20
+
+# Modelli per i canali creati: stesse chiavi di "channels" (tranne name).
+channel_templates:
+  progetto:
+    topic: "{channel} | Canale di progetto della community The Linux Nerd | Regole: {rules_url}"
+    modes: "+nt"
+    owners: ["*!*@the-linux-nerd.example.org"]
+  privato:
+    topic: "{channel} | Canale riservato"
+    modes: "+ntsi"               # segreto e solo su invito
+    modes_lock: true
+    owners: ["*!*@the-linux-nerd.example.org"]
+
 # Maschere nick!user@host degli amministratori del bot (permesso "admin").
 admins:
   - "*!*@the-linux-nerd.example.org"
@@ -774,6 +801,34 @@ commands:
     private: false
     actions:
       - karma_reset: "{arg1}"
+
+  crea:
+    description: "Crea un canale: ci entro, lo registro su ChanServ e applico un modello"
+    usage: "<#canale> [modello]"
+    permission: admin
+    min_args: 1
+    details:
+      - "Modelli disponibili: quelli in channel_templates (es. progetto, privato)."
+      - "Il canale resta nella mia memoria: ci rientro anche dopo un riavvio. Per toglierlo: !chiudi."
+    examples: ["{prefix}crea #rust", "{prefix}crea #staff-segreto privato"]
+    actions:
+      - channel_create: { channel: "{arg1}", template: "{arg2}" }
+
+  chiudi:
+    description: "Chiude un canale creato con !crea (chiede conferma)"
+    usage: "<#canale> [conferma]"
+    permission: admin
+    min_args: 1
+    details:
+      - "Tolgo la registrazione da ChanServ ed esco. In IRC il canale sparisce quando esce l'ultimo utente."
+    actions:
+      - channel_close: { channel: "{arg1}", confirm: "{arg2}" }
+
+  canali:
+    description: "Elenco dei canali che gestisco, con il loro stato (op, topic, modi)"
+    permission: op
+    actions:
+      - channel_list
 
   canale:
     description: "Controlla topic e descrizione dei canali e li corregge come nel file di configurazione"

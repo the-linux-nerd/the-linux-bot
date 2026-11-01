@@ -57,6 +57,9 @@ ACTIONS = {
     "schedule_run": "esegue subito un'attività programmata (per provarla)",
     "db_backup": "copia di sicurezza del database",
     "channel_check": "controlla topic e descrizione dei canali e li imposta come nel file",
+    "channel_create": "crea un canale (entra, lo registra su ChanServ, applica un modello) e lo ricorda",
+    "channel_close": "chiude un canale creato con channel_create (DROP su ChanServ, esce, lo dimentica)",
+    "channel_list": "elenca i canali gestiti e il loro stato",
 }
 
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -643,6 +646,77 @@ def _parse_schedules(data: dict) -> list[ScheduleConfig]:
 
 
 @dataclass
+class ChannelManagementConfig:
+    default_template: str = ""        # modello usato da !crea se non se ne indica uno
+    register: bool = True             # registra su ChanServ i canali creati
+    register_command: str = "REGISTER {channel}"
+    drop: bool = True                 # !chiudi toglie la registrazione da ChanServ (DROP)
+    drop_command: str = "DROP {channel}"
+    confirm_seconds: float = 60.0     # tempo per confermare !chiudi
+    max_channels: int = 20            # canali creati da IRC al massimo
+
+
+CHANNEL_TEMPLATE_KEYS = {"key", "owners", "topic", "topic_lock", "description", "description_command",
+                         "modes", "modes_lock"}
+
+
+def _parse_channel_management(data: dict) -> tuple[ChannelManagementConfig, dict[str, dict]]:
+    cm = _section(data, "channel_management", "")
+    _check_keys(cm, set(ChannelManagementConfig.__dataclass_fields__), "channel_management")
+    cfg = ChannelManagementConfig(**cm)
+    templates: dict[str, dict] = {}
+    for name, tpl in _section(data, "channel_templates", "").items():
+        where = f"channel_templates.{name}"
+        if not isinstance(tpl, dict):
+            raise ConfigError(f"{where}: deve essere una mappa (topic, modes, description, owners...)")
+        _check_keys(tpl, CHANNEL_TEMPLATE_KEYS, where)
+        # valida il modello come se fosse un canale vero
+        _parse_channel({"name": "#modello", **tpl}, where)
+        templates[str(name).lower()] = dict(tpl)
+    if cfg.default_template and cfg.default_template.lower() not in templates:
+        raise ConfigError(f"channel_management.default_template: modello '{cfg.default_template}' non definito "
+                          "in channel_templates")
+    cfg.default_template = cfg.default_template.lower()
+    return cfg, templates
+
+
+def _parse_channel(ch: dict, where: str) -> "ChannelConfig":
+    """Un canale (o un modello di canale) dalla configurazione, con tutti i controlli."""
+    _check_keys(ch, {"name"} | CHANNEL_TEMPLATE_KEYS, where)
+    name = str(ch["name"])
+    if not re.fullmatch(r"[#&][^\s,\x07]{1,49}", name):
+        raise ConfigError(f"{where}: nome di canale non valido '{name}' (es. #linux)")
+    modes = ch.get("modes")
+    if modes is not None:
+        modes = " ".join(str(modes).split())
+        tokens = modes.split()
+        if not tokens or not re.fullmatch(r"[+-][A-Za-z+-]*", tokens[0]):
+            raise ConfigError(f"{where}.modes: usa la sintassi IRC, es. \"+ntC-s\" o \"+ntl 50\"")
+        letters = "".join(t for t in tokens if re.fullmatch(r"[+-][A-Za-z+-]*", t))
+        bad = sorted(set(letters) & set("ovhaqbeI"))
+        if bad:
+            raise ConfigError(f"{where}.modes: {''.join(bad)} non va qui: i modi degli utenti "
+                              "(o, v, h...) e le liste (b, e, I) hanno la loro gestione")
+    topic = ch.get("topic")
+    if topic is not None and len(str(topic).encode()) > 390:
+        raise ConfigError(f"{where}.topic: troppo lungo (i server accettano circa 300-390 byte)")
+    return ChannelConfig(
+        name, ch.get("key") or None, [str(m) for m in _as_list(ch.get("owners"))],
+        topic=" ".join(str(topic).split()) if topic is not None else None,
+        topic_lock=bool(ch.get("topic_lock", False)),
+        description=" ".join(str(ch["description"]).split()) if ch.get("description") is not None else None,
+        description_command=str(ch.get("description_command") or ""),
+        modes=modes, modes_lock=bool(ch.get("modes_lock", False)))
+
+
+def channel_from_template(name: str, template: dict, key: str = "") -> "ChannelConfig":
+    data = {"name": name, **template}
+    if key:
+        data["key"] = key
+    return _parse_channel(data, f"canale {name}")
+
+
+@dataclass
 class SelfOpConfig:
     enabled: bool = False
     method: str = "chanserv"         # chanserv | samode | auto (samode se IRC operator, altrimenti chanserv)
@@ -678,6 +752,8 @@ class ChannelConfig:
     description_command: str = ""   # comando per ChanServ; vuoto = automatico secondo i services
     modes: str | None = None        # modi da garantire, sintassi IRC: "+ntC-s", "+ntl 50", "+k chiave"
     modes_lock: bool = False        # se qualcuno li cambia, il bot li rimette
+    managed: bool = False           # creato con !crea (sta nel database, non nel file)
+    template: str = ""              # modello usato per crearlo
 
 
 @dataclass
@@ -799,6 +875,8 @@ class Config:
     search: SearchConfig = field(default_factory=SearchConfig)
     karma: KarmaConfig = field(default_factory=KarmaConfig)
     schedules: list[ScheduleConfig] = field(default_factory=list)
+    channel_management: ChannelManagementConfig = field(default_factory=ChannelManagementConfig)
+    channel_templates: dict[str, dict] = field(default_factory=dict)
     path: Path | None = None
     data_dir: Path | None = None  # se impostata, i percorsi relativi (database, log, backup) partono da qui
 
@@ -1002,7 +1080,8 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         raise ConfigError("il file di configurazione deve contenere una mappa YAML")
     data = _expand_env(data)
     _check_keys(data, {"server", "identity", "auth", "channels", "admins", "behavior", "variables",
-                       "greetings", "responses", "commands", "events", "logging", "memory", "bans", "self_op", "about", "search", "karma", "schedules"}, "<radice>")
+                       "greetings", "responses", "commands", "events", "logging", "memory", "bans", "self_op", "about", "search", "karma", "schedules",
+                       "channel_management", "channel_templates"}, "<radice>")
 
     # server
     srv = _section(data, "server", "")
@@ -1089,33 +1168,13 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
     channels = []
     for i, ch in enumerate(_as_list(data.get("channels"))):
         if isinstance(ch, str):
-            channels.append(ChannelConfig(ch))
-        elif isinstance(ch, dict) and ch.get("name"):
-            _check_keys(ch, {"name", "key", "owners", "topic", "topic_lock", "description",
-                             "description_command", "modes", "modes_lock"}, f"channels[{i}]")
-            modes = ch.get("modes")
-            if modes is not None:
-                modes = " ".join(str(modes).split())
-                tokens = modes.split()
-                if not tokens or not re.fullmatch(r"[+-][A-Za-z+-]*", tokens[0]):
-                    raise ConfigError(f"channels[{i}].modes: usa la sintassi IRC, es. \"+ntC-s\" o \"+ntl 50\"")
-                letters = "".join(t for t in tokens if re.fullmatch(r"[+-][A-Za-z+-]*", t))
-                bad = sorted(set(letters) & set("ovhaqbeI"))
-                if bad:
-                    raise ConfigError(f"channels[{i}].modes: {''.join(bad)} non va qui: i modi degli utenti "
-                                      "(o, v, h...) e le liste (b, e, I) hanno la loro gestione")
-            topic = ch.get("topic")
-            if topic is not None and len(str(topic).encode()) > 390:
-                raise ConfigError(f"channels[{i}].topic: troppo lungo (i server accettano circa 300-390 byte)")
-            channels.append(ChannelConfig(
-                str(ch["name"]), ch.get("key"), [str(m) for m in _as_list(ch.get("owners"))],
-                topic=" ".join(str(topic).split()) if topic is not None else None,
-                topic_lock=bool(ch.get("topic_lock", False)),
-                description=" ".join(str(ch["description"]).split()) if ch.get("description") is not None else None,
-                description_command=str(ch.get("description_command") or ""),
-                modes=modes, modes_lock=bool(ch.get("modes_lock", False))))
-        else:
+            ch = {"name": ch}
+        if not isinstance(ch, dict) or not ch.get("name"):
             raise ConfigError(f"channels[{i}]: deve essere un nome o una mappa con 'name'")
+        channels.append(_parse_channel(ch, f"channels[{i}]"))
+    names = [c.name.lower() for c in channels]
+    if len(set(names)) != len(names):
+        raise ConfigError("channels: lo stesso canale compare più volte")
 
     # behavior
     beh_d = _section(data, "behavior", "")
@@ -1263,11 +1322,13 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
             raise ConfigError(f"events.{name}: evento sconosciuto (disponibili: {', '.join(EVENTS)})")
         events[name] = validate_actions(actions, f"events.{name}")
 
+    management, templates = _parse_channel_management(data)
     return Config(
         server=server, identity=identity, auth=auth, channels=channels,
         admins=[str(a) for a in _as_list(data.get("admins"))], behavior=behavior,
         variables=variables, greetings=greetings, responses=responses, commands=commands,
         events=events, logging=_parse_logging(data), memory=_parse_memory(data), bans=_parse_bans(data), self_op=_parse_self_op(data), about=_parse_about(data), search=_parse_search(data), karma=_parse_karma(data), schedules=_parse_schedules(data),
+        channel_management=management, channel_templates=templates,
         path=path,
     )
 

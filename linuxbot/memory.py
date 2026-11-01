@@ -78,6 +78,15 @@ CREATE TABLE IF NOT EXISTS karma_log (
     ts           REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS karma_log_giver ON karma_log (giver_key, ts);
+CREATE TABLE IF NOT EXISTS managed_channels (
+    name_key   TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    template   TEXT NOT NULL DEFAULT '',
+    chan_key   TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    registered INTEGER NOT NULL DEFAULT 0,
+    ts         REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS state (
     key     TEXT PRIMARY KEY,       -- es. "schedule:karma-mezzanotte", "youtube:@the-linux-nerd"
     value   TEXT NOT NULL,          -- JSON
@@ -217,6 +226,32 @@ class Memory:
                         (key, json.dumps(value), self.clock()))
         self.db.commit()
 
+    # ------------------------------------------------------------------ canali creati da IRC
+
+    @_timed
+    def channel_add(self, name: str, template: str = "", key: str = "", created_by: str = "") -> None:
+        self.db.execute("INSERT OR REPLACE INTO managed_channels (name_key, name, template, chan_key, created_by, ts) "
+                        "VALUES (?, ?, ?, ?, ?, ?)", (irc_lower(name), name, template, key, created_by, self.clock()))
+        self.db.commit()
+
+    @_timed
+    def channel_remove(self, name: str) -> bool:
+        cur = self.db.execute("DELETE FROM managed_channels WHERE name_key = ?", (irc_lower(name),))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    @_timed
+    def channel_set_registered(self, name: str, registered: bool = True) -> None:
+        self.db.execute("UPDATE managed_channels SET registered = ? WHERE name_key = ?",
+                        (int(registered), irc_lower(name)))
+        self.db.commit()
+
+    @_timed
+    def channel_list(self) -> list[dict]:
+        rows = self.db.execute("SELECT name, template, chan_key, created_by, registered, ts FROM managed_channels "
+                               "ORDER BY ts")
+        return [dict(zip(("name", "template", "key", "created_by", "registered", "ts"), r)) for r in rows]
+
     @_timed
     def summary(self) -> dict[str, int]:
         """Quanti dati ci sono: utile nel log all'avvio per vedere che la memoria è stata ritrovata."""
@@ -226,6 +261,7 @@ class Memory:
             "messaggi in attesa": q("SELECT COUNT(*) FROM memos WHERE delivered_ts IS NULL"),
             "ban attivi": q("SELECT COUNT(*) FROM bans WHERE removed_ts IS NULL"),
             "utenti con karma": q("SELECT COUNT(*) FROM karma WHERE score != 0"),
+            "canali creati da IRC": q("SELECT COUNT(*) FROM managed_channels"),
         }
 
     @_timed

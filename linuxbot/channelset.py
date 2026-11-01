@@ -201,6 +201,7 @@ class ChannelSettingsMixin:
         cfg = self._channel_cfg(channel)
         if chan is None or cfg is None:
             return done
+        self._maybe_register(channel)  # canali appena creati con !crea
         wanted = self.wanted_topic(channel)
         if wanted is not None and chan.topic_known and _norm(chan.topic) != wanted:
             if self._is_op_in(channel):
