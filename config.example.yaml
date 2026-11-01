@@ -89,6 +89,18 @@ channels:
     owners:
       - "*!*@the-linux-nerd.example.org"
       - "*!*@user/fabio"              # cloak dei services
+    # Topic (il "titolo" del canale): quando il bot ha l'op controlla quello attuale
+    # e, se è diverso, lo imposta. Con topic_lock lo rimette se qualcuno lo cambia
+    # (anche gli op: per cambiarlo davvero si modifica qui e si fa !reload).
+    # Si possono usare le variabili, es. {rules_url}.
+    topic: "Benvenuti su #linux | Domande su Linux e dintorni | Regole: {rules_url} | Log lunghi su {pastebin}"
+    topic_lock: false
+    # Descrizione registrata presso ChanServ (la mostra /msg ChanServ INFO #linux).
+    # Il bot la legge e, se è diversa, la aggiorna: serve che il bot abbia il permesso
+    # SET su ChanServ (es. founder o flag +s). Su Anope si usa SET DESC; Atheme non ha
+    # una descrizione del canale (il bot lo segnala nel log). Comando personalizzato:
+    # description_command: "SET DESC {channel} {description}"
+    description: "Canale italiano di aiuto e chiacchiere su Linux, open source e programmazione"
   - name: "#linux-staff"
     key: ${LINUXBOT_STAFF_KEY:-segreto}
     owners: ["*!*@the-linux-nerd.example.org"]
@@ -749,6 +761,13 @@ commands:
     private: false
     actions:
       - karma_reset: "{arg1}"
+
+  canale:
+    description: "Controlla topic e descrizione dei canali e li corregge come nel file di configurazione"
+    usage: "[#canale]"
+    permission: admin
+    actions:
+      - channel_check: "{arg1}"
 
   backup:
     description: "Copia di sicurezza del database adesso"

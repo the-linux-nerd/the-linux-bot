@@ -109,6 +109,34 @@ Non serve sapere quali services usa il server (Anope, Atheme...): il bot si rego
    principale appena chi lo usa esce o cambia nick. `regain_commands` permette di indicare
    comandi propri, `regain: false` disattiva il recupero.
 
+## Topic e descrizione del canale
+
+Per ogni canale puoi indicare il topic (il "titolo") e la descrizione che deve avere:
+
+```yaml
+channels:
+  - name: "#linux"
+    topic: "Benvenuti su #linux | Regole: {rules_url}"
+    topic_lock: false
+    description: "Canale italiano di aiuto su Linux e open source"
+```
+
+- **Topic**: quando entra (e quando riceve l'op) il bot confronta il topic attuale con quello
+  configurato, senza badare agli spazi, e lo imposta se è diverso. Serve l'op: se non ce l'ha
+  lo scrive nel log e lo fa appena lo riceve. Nel testo si possono usare le variabili
+  (`{rules_url}`, `{channel}`...).
+- **`topic_lock: true`**: se qualcuno cambia il topic, il bot rimette quello configurato (anche
+  se a cambiarlo è un op: per un topic nuovo si modifica il file e si fa `!reload`). Con
+  `false` il bot imposta il topic quando entra e poi lascia liberi gli op.
+- **Descrizione**: non è un'impostazione di IRC ma di ChanServ (`/msg ChanServ INFO #canale`).
+  Il bot chiede `INFO`, legge la riga "Description" e, se è diversa, manda `SET DESC` (Anope).
+  Atheme non ha una descrizione dei canali: il bot lo dice nel log e non fa niente. Il bot deve
+  avere il permesso di modificare il canale su ChanServ (founder, o flag/livello adatto); se non
+  ce l'ha, la risposta di ChanServ finisce nel log. `description_command` permette un comando
+  diverso (es. `"SET {channel} URL https://..."` su Atheme).
+- La descrizione si controlla una volta per connessione; tutto viene ricontrollato dopo un
+  `!reload`, e `!canale [#canale]` (admin) forza il controllo subito.
+
 ## Il bot si spiega agli utenti
 
 Se gli si chiede chi è o come funziona, il bot risponde con una presentazione (`about.intro`)
@@ -293,7 +321,7 @@ un esempio di tutto. In sintesi:
 | `search`     | ricerca su Stack Exchange, wiki MediaWiki e canali YouTube |
 | `karma`      | karma del canale e relative regole |
 | `schedules`  | attività a orari fissi o a intervalli |
-| `channels`   | canali (nome o `{name, key, owners}`) |
+| `channels`   | canali (nome o `{name, key, owners, topic, topic_lock, description}`) |
 | `admins`     | maschere `nick!user@host` degli amministratori del bot |
 | `behavior`   | prefissi dei comandi, utenti ignorati, anti-flood, riconnessione, messaggi di sistema |
 | `variables`  | variabili personalizzate usabili in tutti i testi |

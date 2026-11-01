@@ -17,6 +17,7 @@ from typing import Any, Callable
 from . import __version__
 from .about import AboutMixin
 from .bans import BanMixin
+from .channelset import ChannelSettingsMixin
 from .chatlog import ChatLog
 from .karma import KarmaMixin
 from .scheduler import SchedulerMixin
@@ -49,9 +50,10 @@ class Channel:
     name: str
     users: dict[str, set[str]] = field(default_factory=dict)  # nick (lower) -> modi (es. {"o", "v"})
     topic: str = ""
+    topic_known: bool = False  # True quando il server ci ha detto il topic (o che non c'è)
 
 
-class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin):
+class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, ChannelSettingsMixin):
     def __init__(self, config: Config, clock: Callable[[], float] = time.monotonic,
                  wallclock: Callable[[], float] = time.time):
         self.config = config
@@ -68,6 +70,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin):
         self._schedule_last: dict[str, dict] = {}
         self._op_tasks: dict[str, asyncio.Task] = {}
         self._reset_services()
+        self._reset_channel_settings()
         self._identified: asyncio.Event | None = None
         self._ban_resync: dict = {}
         self._open_memory()
@@ -224,6 +227,11 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin):
         self._identified = None
         self._op_tasks.clear()
         self._reset_services()
+        self._reset_channel_settings()
+
+    def _reset_channel_settings(self) -> None:
+        self._desc_waiting, self._desc_queue = {}, []
+        self._desc_done, self._topic_warned = set(), set()
 
     def _reset_services(self) -> None:
         self.services_kind, self.services_version = "", ""
@@ -410,7 +418,16 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin):
         elif code == "332" and len(msg.params) >= 3:
             chan = self.channels.get(irc_lower(msg.params[1]))
             if chan:
-                chan.topic = msg.last
+                chan.topic, chan.topic_known = msg.last, True
+        elif code == "331" and len(msg.params) >= 2:  # RPL_NOTOPIC
+            chan = self.channels.get(irc_lower(msg.params[1]))
+            if chan:
+                chan.topic, chan.topic_known = "", True
+        elif code == "366" and len(msg.params) >= 2:  # fine della lista utenti: ora sappiamo topic e op
+            chan = self.channels.get(irc_lower(msg.params[1]))
+            if chan:
+                chan.topic_known = True  # senza 332 il canale non ha topic
+                self.check_channel_settings(chan.name, "ingresso")
         elif code == "367":
             self._ban_list_entry(msg.params)
         elif code == "368" and len(msg.params) > 1:
@@ -525,7 +542,8 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin):
     def _on_topic(self, msg: Message) -> None:
         chan = self.channels.get(irc_lower(msg.params[0]))
         if chan:
-            chan.topic = msg.last
+            chan.topic, chan.topic_known = msg.last, True
+            self._channel_settings_on_topic(chan.name, msg.nick)
         ctx = self._base_context(msg, msg.params[0])
         ctx["topic"] = msg.last
         self._chat(msg.params[0], f"--- {msg.nick} ha cambiato il topic: {msg.last}")
@@ -584,6 +602,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin):
                     self._identified.set()  # entra comunque, ma senza op automatico
         elif irc_lower(msg.nick) == irc_lower(self.config.self_op.service):
             log_op.info("%s: %s", msg.nick, text)
+            self._chanserv_notice(text)
 
     def _set_identified(self) -> None:
         if self._identified is not None:
@@ -1214,6 +1233,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin):
         if adding:
             log_op.info("Ho ricevuto l'op in %s da %s", channel, by)
             self.run_event("self_op", ctx)
+            self.check_channel_settings(channel, "ricevuto l'op")
         else:
             log_op.warning("%s mi ha tolto l'op in %s", by, channel)
             self.run_event("self_deop", ctx)
@@ -1410,6 +1430,9 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin):
         for hook in self.reload_hooks:
             hook(new)
         log_cfg.info("Configurazione ricaricata da %s", new.path)
+        self._desc_done.clear()
+        self._topic_warned.clear()
+        self.check_all_channels("configurazione ricaricata")
         if self.registered:
             self._spawn(self._join_channels())
 

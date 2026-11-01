@@ -56,6 +56,7 @@ ACTIONS = {
     "karma_reset": "azzera il karma di un utente",
     "schedule_run": "esegue subito un'attività programmata (per provarla)",
     "db_backup": "copia di sicurezza del database",
+    "channel_check": "controlla topic e descrizione dei canali e li imposta come nel file",
 }
 
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -671,6 +672,10 @@ class ChannelConfig:
     name: str
     key: str | None = None
     owners: list[str] = field(default_factory=list)  # maschere immuni a ban e kick in questo canale
+    topic: str | None = None        # titolo del canale da garantire (None = non toccarlo)
+    topic_lock: bool = False        # se qualcuno cambia il topic, il bot rimette quello configurato
+    description: str | None = None  # descrizione registrata presso ChanServ (None = non toccarla)
+    description_command: str = ""   # comando per ChanServ; vuoto = automatico secondo i services
 
 
 @dataclass
@@ -1084,9 +1089,17 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         if isinstance(ch, str):
             channels.append(ChannelConfig(ch))
         elif isinstance(ch, dict) and ch.get("name"):
-            _check_keys(ch, {"name", "key", "owners"}, f"channels[{i}]")
-            channels.append(ChannelConfig(str(ch["name"]), ch.get("key"),
-                                          [str(m) for m in _as_list(ch.get("owners"))]))
+            _check_keys(ch, {"name", "key", "owners", "topic", "topic_lock", "description",
+                             "description_command"}, f"channels[{i}]")
+            topic = ch.get("topic")
+            if topic is not None and len(str(topic).encode()) > 390:
+                raise ConfigError(f"channels[{i}].topic: troppo lungo (i server accettano circa 300-390 byte)")
+            channels.append(ChannelConfig(
+                str(ch["name"]), ch.get("key"), [str(m) for m in _as_list(ch.get("owners"))],
+                topic=" ".join(str(topic).split()) if topic is not None else None,
+                topic_lock=bool(ch.get("topic_lock", False)),
+                description=" ".join(str(ch["description"]).split()) if ch.get("description") is not None else None,
+                description_command=str(ch.get("description_command") or "")))
         else:
             raise ConfigError(f"channels[{i}]: deve essere un nome o una mappa con 'name'")
 
