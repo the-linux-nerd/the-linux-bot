@@ -676,6 +676,8 @@ class ChannelConfig:
     topic_lock: bool = False        # se qualcuno cambia il topic, il bot rimette quello configurato
     description: str | None = None  # descrizione registrata presso ChanServ (None = non toccarla)
     description_command: str = ""   # comando per ChanServ; vuoto = automatico secondo i services
+    modes: str | None = None        # modi da garantire, sintassi IRC: "+ntC-s", "+ntl 50", "+k chiave"
+    modes_lock: bool = False        # se qualcuno li cambia, il bot li rimette
 
 
 @dataclass
@@ -1090,7 +1092,18 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
             channels.append(ChannelConfig(ch))
         elif isinstance(ch, dict) and ch.get("name"):
             _check_keys(ch, {"name", "key", "owners", "topic", "topic_lock", "description",
-                             "description_command"}, f"channels[{i}]")
+                             "description_command", "modes", "modes_lock"}, f"channels[{i}]")
+            modes = ch.get("modes")
+            if modes is not None:
+                modes = " ".join(str(modes).split())
+                tokens = modes.split()
+                if not tokens or not re.fullmatch(r"[+-][A-Za-z+-]*", tokens[0]):
+                    raise ConfigError(f"channels[{i}].modes: usa la sintassi IRC, es. \"+ntC-s\" o \"+ntl 50\"")
+                letters = "".join(t for t in tokens if re.fullmatch(r"[+-][A-Za-z+-]*", t))
+                bad = sorted(set(letters) & set("ovhaqbeI"))
+                if bad:
+                    raise ConfigError(f"channels[{i}].modes: {''.join(bad)} non va qui: i modi degli utenti "
+                                      "(o, v, h...) e le liste (b, e, I) hanno la loro gestione")
             topic = ch.get("topic")
             if topic is not None and len(str(topic).encode()) > 390:
                 raise ConfigError(f"channels[{i}].topic: troppo lungo (i server accettano circa 300-390 byte)")
@@ -1099,7 +1112,8 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
                 topic=" ".join(str(topic).split()) if topic is not None else None,
                 topic_lock=bool(ch.get("topic_lock", False)),
                 description=" ".join(str(ch["description"]).split()) if ch.get("description") is not None else None,
-                description_command=str(ch.get("description_command") or "")))
+                description_command=str(ch.get("description_command") or ""),
+                modes=modes, modes_lock=bool(ch.get("modes_lock", False))))
         else:
             raise ConfigError(f"channels[{i}]: deve essere un nome o una mappa con 'name'")
 

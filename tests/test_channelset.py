@@ -123,7 +123,7 @@ class ChannelSettingsTest(unittest.IsolatedAsyncioTestCase):
         await self.bot.drain()
         out = self.bot.take()
         self.assertIn("PRIVMSG ChanServ :INFO #linux", out)
-        self.assertIn("NOTICE boss :Controllo di topic e descrizione avviato in #linux.", out)
+        self.assertIn("NOTICE boss :Controllo di topic, modi e descrizione avviato in #linux.", out)
 
     def test_config_validation(self):
         base = {"server": {"host": "h"}, "identity": {"nick": "n"}}
@@ -137,3 +137,88 @@ class ChannelSettingsTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+MODES = """
+channels:
+  - name: "#linux"
+    modes: "+ntC-sm"
+  - name: "#chiuso"
+    modes: "+ntkl segreta 50"
+    modes_lock: true
+"""
+
+
+class ChannelModesTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.bot = make_bot(MODES)
+        self.bot.handle_line(":srv 005 Bot CHANMODES=beI,k,l,imnpstCR PREFIX=(ov)@+ :are supported")
+
+    def join(self, channel, current, op=True):
+        bot = self.bot
+        bot.handle_line(f":Bot!b@h JOIN {channel}")
+        bot.handle_line(f":srv 353 Bot = {channel} :{'@' if op else ''}Bot anna")
+        bot.handle_line(f":srv 366 Bot {channel} :End")
+        self.assertIn(f"MODE {channel}", bot.take())  # chiede i modi attuali
+        bot.handle_line(f":srv 324 Bot {channel} {current}")
+        return [line for line in bot.take() if line.startswith("MODE")]
+
+    def test_parse(self):
+        self.assertEqual(self.bot.parse_modes("+ntkl segreta 50 -s"),
+                         {"n": (True, None), "t": (True, None), "k": (True, "segreta"), "l": (True, "50"),
+                          "s": (False, None)})
+        with self.assertLogs("linuxbot.channels", "WARNING"):
+            self.assertEqual(self.bot.parse_modes("+nl"), {"n": (True, None)})
+
+    async def test_only_needed_changes(self):
+        out = self.join("#linux", "+nsm")
+        self.assertEqual(out, ["MODE #linux +tC-sm"])
+
+    async def test_nothing_when_already_right(self):
+        self.assertEqual(self.join("#linux", "+ntC"), [])
+
+    async def test_params_key_and_limit(self):
+        out = self.join("#chiuso", "+ntl 10")
+        self.assertEqual(out, ["MODE #chiuso +kl segreta 50"])
+
+    async def test_waits_for_op(self):
+        with self.assertLogs("linuxbot.channels", "WARNING"):
+            self.assertEqual(self.join("#linux", "+n", op=False), [])
+        self.bot.handle_line(":ChanServ!s@services MODE #linux +o Bot")
+        self.assertIn("MODE #linux +tC", self.bot.take())
+
+    async def test_lock_reverts_and_tracks_changes(self):
+        self.join("#chiuso", "+ntkl segreta 50")
+        self.bot.handle_line(":anna!a@h MODE #chiuso -k segreta")
+        self.assertEqual(self.bot.take(), ["MODE #chiuso +k segreta"])
+        self.bot.handle_line(":Bot!b@h MODE #chiuso +k segreta")   # la nostra eco
+        self.assertEqual(self.bot.take(), [])
+        self.bot.handle_line(":anna!a@h MODE #chiuso +s")         # modo non configurato: va bene
+        self.assertEqual(self.bot.take(), [])
+
+    async def test_no_lock_respects_changes(self):
+        self.join("#linux", "+ntC")
+        self.bot.handle_line(":anna!a@h MODE #linux -C")
+        self.assertEqual(self.bot.take(), [])
+
+    async def test_lock_stops_on_conflict(self):
+        self.join("#chiuso", "+ntkl segreta 50")
+        for _ in range(3):
+            self.bot.handle_line(":ChanServ!s@services MODE #chiuso -l")
+            self.bot.handle_line(":Bot!b@h MODE #chiuso +l 50")
+        self.bot.take()
+        with self.assertLogs("linuxbot.channels", "ERROR") as logs:
+            self.bot.handle_line(":ChanServ!s@services MODE #chiuso -l")
+        self.assertEqual(self.bot.take(), [])
+        self.assertIn("MLOCK", logs.output[0])
+
+    async def test_key_hidden_in_log(self):
+        with self.assertLogs("linuxbot.channels", "INFO") as logs:
+            self.join("#chiuso", "+nt")
+        self.assertNotIn("segreta", "\n".join(logs.output))
+
+    def test_config_validation(self):
+        base = {"server": {"host": "h"}, "identity": {"nick": "n"}}
+        for bad in ("ntC", "+o pippo", "+b *!*@*", ""):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError):
+                parse_config({**base, "channels": [{"name": "#x", "modes": bad}]})

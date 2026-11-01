@@ -109,15 +109,17 @@ Non serve sapere quali services usa il server (Anope, Atheme...): il bot si rego
    principale appena chi lo usa esce o cambia nick. `regain_commands` permette di indicare
    comandi propri, `regain: false` disattiva il recupero.
 
-## Topic e descrizione del canale
+## Topic, modi e descrizione del canale
 
-Per ogni canale puoi indicare il topic (il "titolo") e la descrizione che deve avere:
+Per ogni canale puoi indicare il topic (il "titolo"), i modi e la descrizione che deve avere:
 
 ```yaml
 channels:
   - name: "#linux"
     topic: "Benvenuti su #linux | Regole: {rules_url}"
     topic_lock: false
+    modes: "+nt"
+    modes_lock: false
     description: "Canale italiano di aiuto su Linux e open source"
 ```
 
@@ -134,6 +136,16 @@ channels:
   avere il permesso di modificare il canale su ChanServ (founder, o flag/livello adatto); se non
   ce l'ha, la risposta di ChanServ finisce nel log. `description_command` permette un comando
   diverso (es. `"SET {channel} URL https://..."` su Atheme).
+- **Modi** (`modes`, sintassi IRC: `"+nt"`, `"+ntC-s"`, `"+ntl 80"`, `"+k chiave"`): il bot
+  chiede al server i modi attuali (`MODE #canale`), li confronta con quelli configurati e manda
+  solo le modifiche necessarie (es. `MODE #linux +tC-sm`); i modi non nominati non vengono
+  toccati. I tipi di modo (con o senza parametro) li dice il server (`CHANMODES`), quindi vale
+  per qualsiasi ircd; se una lettera non esiste il server la rifiuta e il bot lo scrive nel log.
+  Ban, eccezioni e modi degli utenti (`b`, `e`, `I`, `o`, `v`...) non si mettono qui.
+- **`modes_lock: true`**: se qualcuno cambia un modo configurato, il bot lo rimette. Se i
+  modi vengono cambiati di continuo (tipicamente un `MLOCK` di ChanServ diverso dal file),
+  dopo 3 ripristini in un minuto il bot si ferma e lo segnala, invece di fare a botta e
+  risposta all'infinito. Nei log la chiave `+k` non compare.
 - La descrizione si controlla una volta per connessione; tutto viene ricontrollato dopo un
   `!reload`, e `!canale [#canale]` (admin) forza il controllo subito.
 
@@ -321,7 +333,7 @@ un esempio di tutto. In sintesi:
 | `search`     | ricerca su Stack Exchange, wiki MediaWiki e canali YouTube |
 | `karma`      | karma del canale e relative regole |
 | `schedules`  | attività a orari fissi o a intervalli |
-| `channels`   | canali (nome o `{name, key, owners, topic, topic_lock, description}`) |
+| `channels`   | canali (nome o `{name, key, owners, topic, topic_lock, modes, modes_lock, description}`) |
 | `admins`     | maschere `nick!user@host` degli amministratori del bot |
 | `behavior`   | prefissi dei comandi, utenti ignorati, anti-flood, riconnessione, messaggi di sistema |
 | `variables`  | variabili personalizzate usabili in tutti i testi |

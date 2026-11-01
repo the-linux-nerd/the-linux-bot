@@ -51,6 +51,8 @@ class Channel:
     users: dict[str, set[str]] = field(default_factory=dict)  # nick (lower) -> modi (es. {"o", "v"})
     topic: str = ""
     topic_known: bool = False  # True quando il server ci ha detto il topic (o che non c'è)
+    modes: dict[str, str | None] = field(default_factory=dict)  # modi del canale (non liste) -> parametro
+    modes_known: bool = False
 
 
 class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, ChannelSettingsMixin):
@@ -232,6 +234,7 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, Chann
     def _reset_channel_settings(self) -> None:
         self._desc_waiting, self._desc_queue = {}, []
         self._desc_done, self._topic_warned = set(), set()
+        self._modes_queried, self._modes_reverts = set(), {}
 
     def _reset_services(self) -> None:
         self.services_kind, self.services_version = "", ""
@@ -419,6 +422,10 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, Chann
             chan = self.channels.get(irc_lower(msg.params[1]))
             if chan:
                 chan.topic, chan.topic_known = msg.last, True
+        elif code == "324" and len(msg.params) >= 3:  # RPL_CHANNELMODEIS
+            self._on_channel_modes(msg.params[1], msg.params[2], msg.params[3:])
+        elif code in ("472", "482") and len(msg.params) >= 2:  # modo sconosciuto / serve l'op
+            log_chan.warning("Il server rifiuta un cambio di modi (%s): %s %s", code, msg.params[1], msg.last)
         elif code == "331" and len(msg.params) >= 2:  # RPL_NOTOPIC
             chan = self.channels.get(irc_lower(msg.params[1]))
             if chan:
@@ -580,6 +587,12 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, Chann
                 if adding:
                     self._karma_on_ban(chan.name, arg, msg.nick)
                 self._ban_on_mode(msg.nick, chan.name, adding, arg)
+            elif ch not in self.chanmodes[0] and ch not in self.prefix_modes:  # modi del canale (non liste)
+                if adding:
+                    chan.modes[ch] = arg
+                else:
+                    chan.modes.pop(ch, None)
+        self._channel_settings_on_modes(chan.name, msg.nick)
 
     # ------------------------------------------------------------------ messaggi
 

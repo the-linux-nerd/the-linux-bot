@@ -95,6 +95,17 @@ channels:
     # Si possono usare le variabili, es. {rules_url}.
     topic: "Benvenuti su #linux | Domande su Linux e dintorni | Regole: {rules_url} | Log lunghi su {pastebin}"
     topic_lock: false
+    # Modi del canale, nella sintassi di IRC: il bot li confronta con quelli attuali
+    # e manda solo le modifiche necessarie (serve l'op). Esempi:
+    #   "+nt"          niente messaggi da fuori, topic solo per gli op
+    #   "+ntC-s"       ...e niente CTCP, e il canale non deve essere segreto
+    #   "+ntl 80"      ...con al massimo 80 utenti
+    # Le lettere disponibili dipendono dal server (CHANMODES): una lettera sconosciuta
+    # viene rifiutata dal server e il bot lo scrive nel log. Ban (+b) e modi degli
+    # utenti (+o, +v) non vanno qui. Con modes_lock il bot li rimette se qualcuno li
+    # cambia; se usi già un MLOCK di ChanServ, tienilo uguale a questo.
+    modes: "+nt"
+    modes_lock: false
     # Descrizione registrata presso ChanServ (la mostra /msg ChanServ INFO #linux).
     # Il bot la legge e, se è diversa, la aggiorna: serve che il bot abbia il permesso
     # SET su ChanServ (es. founder o flag +s). Su Anope si usa SET DESC; Atheme non ha
@@ -104,6 +115,8 @@ channels:
   - name: "#linux-staff"
     key: ${LINUXBOT_STAFF_KEY:-segreto}
     owners: ["*!*@the-linux-nerd.example.org"]
+    modes: "+nts"            # canale staff: anche segreto (non compare in /list)
+    modes_lock: true
 
 # Maschere nick!user@host degli amministratori del bot (permesso "admin").
 admins:
