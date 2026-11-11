@@ -1417,6 +1417,9 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, Chann
         scale = str(opts.get("chars") or activity.DEFAULT_SCALE)
         if len(scale) < 2:
             scale = activity.DEFAULT_SCALE
+        slot = int(self._number(str(opts.get("slot", activity.DEFAULT_SLOT))) or 0)
+        if slot not in activity.SLOTS:
+            slot = activity.DEFAULT_SLOT
         if self.seen_store is None:
             log_mem.warning("activity_map: la memoria è disabilitata (memory.enabled)")
             return
@@ -1438,12 +1441,10 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, Chann
         if len(names) != 7:
             names = MEMORY_TEXTS["activity_days"].split()
         self.say(target, self._mem_text("activity_title", ctx, where=where, period=period, count=total))
-        for line in activity.render_map(grid, names, self._mem_text("activity_hour", ctx), scale):
+        for line in activity.render_map(grid, names, self._mem_text("activity_hour", ctx), scale, slot):
             self.say(target, line)
-        peak = max(v for row in grid for v in row)
-        pday, phour = next((d, h) for d in range(7) for h in range(24) if grid[d][h] == peak)
-        self.say(target, self._mem_text("activity_legend", ctx, scale=scale, low=scale[0], high=scale[-1],
-                                        peak=peak, peak_day=names[pday], peak_hour=f"{phour:02d}:00"))
+        best = " · ".join(f"{names[d]} {h:02d}-{h + slot:02d}" for d, h, _ in activity.best_slots(grid, slot))
+        self.say(target, self._mem_text("activity_best", ctx, best=best))
 
     _NICK_RE = re.compile(r"^[A-Za-z\[\]\\`_^{|}][A-Za-z0-9\[\]\\`_^{|}-]*$")
 

@@ -131,7 +131,7 @@ una mappa. Il canale di default è quello in cui è arrivato il comando.
 | `stats` | `stats` | `stats: {section, method}` |
 | `seen` | `seen: "{arg1}"` | `seen: {nick}` |
 | `recent` | `recent: "{arg1}"` (giorni) | `recent: {days, hours, channel, all_channels}` |
-| `activity_map` | `activity_map: "{arg1}"` (giorni) | `activity_map: {days, channel, all_channels, chars}` |
+| `activity_map` | `activity_map: "{arg1}"` (giorni) | `activity_map: {days, channel, all_channels, chars, slot}` |
 | `memo_add` | | `memo_add: {to: "{arg1}", text: "{rest}"}` |
 | `memo_read` | `memo_read` | |
 
@@ -303,26 +303,30 @@ puoi collegarle a qualsiasi comando o frase. Tutti i testi si cambiano in `memor
 `seen`, `seen_here`, `seen_never`, `seen_self`, `seen_bot`, `seen_usage`, `event_join`, `event_part`,
 `event_quit`, `event_kick`, `event_nick`, `event_nick_from`, `event_message`, `event_message_text`,
 `recent`, `recent_none`, `recent_more`, `activity_title`, `activity_period_days`, `activity_period_all`,
-`activity_everywhere`, `activity_days`, `activity_hour`, `activity_legend`, `activity_none`, `memo_saved`, `memo_usage`, `memo_self`, `memo_bot`,
+`activity_everywhere`, `activity_days`, `activity_hour`, `activity_best`, `activity_none`, `memo_saved`, `memo_usage`, `memo_self`, `memo_bot`,
 `memo_too_long`, `memo_full`, `memo_delivered`, `memo_none`.
 
 ### Mappa dell'attività
 
 Con la memoria accesa il bot conta i messaggi di ogni canale per giorno e per ora (solo il numero:
-niente nick, niente testo). `!mappaattivita` li disegna come heatmap ASCII, giorni della settimana
-per ore, con il totale di ogni giorno e il picco:
+niente nick, niente testo). `!mappaattivita` serve a chi vuole sapere quando connettersi per
+trovare gente: disegna i giorni della settimana per fasce di quattro ore, con il totale di ogni
+giorno, e chiude con le tre fasce più vive:
 
 ```
-Attività di #the-linux-nerd dal 16/05/2024: 1243 messaggi.
-ora 00    03    06    09    12    15    18    21
-Lun                   ..::....::....::::--++**..  162
-Mar     ..            ..::--..::..::--==##@@==..  231
+Quando c'è gente in #the-linux-nerd (69 messaggi dal 22/07/2024).
+ore 00-04 04-08 08-12 12-16 16-20 20-24
+Lun  ░░░    ·     ·     ·     ·    ███   40
+Mar  ░░░    ·    ░░░   ░░░   ░░░   ░░░   11
+Mer  ░░░    ·    ░░░   ░░░    ·     ·    11
 ...
-Scala ' .:-=+*#%@': ' ' nessuno, '@' fino a 41 messaggi l'ora. Picco: Mar alle 21:00.
+Dom   ·     ·     ·     ·     ·     ·    0
+Meglio venire: Lun 20-24 · Mer 00-04 · Mar 08-12.
 ```
 
 `!mappaattivita 30` guarda solo gli ultimi 30 giorni. Le opzioni dell'azione: `days`, `channel`,
-`all_channels` (tutti i canali insieme) e `chars`, la scala dei caratteri dal vuoto al picco.
+`all_channels` (tutti i canali insieme), `chars`, la scala dal vuoto al pieno (`·░▒▓█`; il primo
+carattere segna le fasce vuote), e `slot`, le ore di ogni fascia (1, 2, 3, 4, 6, 8 o 12; 4 di default).
 Non contano i messaggi del bot, quelli degli utenti in `behavior.ignore`, i privati e le azioni /me.
 L'ora è quella locale del bot. I conteggi non scadono con `retention_days`: sono pochi e anonimi.
 

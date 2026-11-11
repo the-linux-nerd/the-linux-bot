@@ -414,7 +414,7 @@ Senza indicazioni il canale è quello del messaggio e il nick quello di chi l'ha
 | `quit` | `quit: "motivo"` | disconnette il bot |
 | `seen` | `seen: "{arg1}"` | `{nick}` |
 | `recent` | `recent: "{arg1}"` | `{days, hours, channel, all_channels}` |
-| `activity_map` | `activity_map: "{arg1}"` (giorni, vuoto = tutto) | `{days, channel, all_channels, chars}` |
+| `activity_map` | `activity_map: "{arg1}"` (giorni, vuoto = tutto) | `{days, channel, all_channels, chars, slot}` |
 | `memo_add` | — | `{to, text}` |
 | `memo_read` | `memo_read` | consegna i messaggi a chi chiede |
 | `banlist` | `banlist` | `{channel}` |
@@ -487,13 +487,13 @@ codice con `python contrib/gen-docs.py`.
 | `recent` | Passati {period} ({count}): {names} |
 | `recent_none` | Non è passato nessuno {period}. |
 | `recent_more` | e altri {count} |
-| `activity_title` | Attività di {where} {period}: {count} messaggi. |
+| `activity_title` | Quando c'è gente in {where} ({count} messaggi {period}). |
 | `activity_period_days` | negli ultimi {days} giorni |
 | `activity_period_all` | dal {since} |
 | `activity_everywhere` | tutti i canali |
 | `activity_days` | Lun Mar Mer Gio Ven Sab Dom |
-| `activity_hour` | ora |
-| `activity_legend` | Scala '{scale}': '{low}' nessuno, '{high}' fino a {peak} messaggi l'ora. Picco: {peak_day} alle {peak_hour}. |
+| `activity_hour` | ore |
+| `activity_best` | Meglio venire: {best}. |
 | `activity_none` | Non ho ancora contato messaggi in {where} {period}. |
 | `memo_saved` | Ok {nick}, riferirò il messaggio a {recipient} appena lo vedo. |
 | `memo_usage` | Uso: {prefix}lascia <nick> <messaggio> |

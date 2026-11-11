@@ -14,7 +14,9 @@ from pathlib import Path
 
 from .irc import irc_lower
 
-DEFAULT_SCALE = " .:-=+*#%@"
+DEFAULT_SCALE = "·░▒▓█"
+DEFAULT_SLOT = 4
+SLOTS = (1, 2, 3, 4, 6, 8, 12)
 
 _NICK = r"[A-Za-z\[\]\\`_^{|}][A-Za-z0-9\[\]\\`_^{|}-]*"
 # weechat: "2024-05-16 21:03:11<TAB>@nick<TAB>testo"; le righe di servizio hanno "-->", "<--", "--", " *"
@@ -33,21 +35,42 @@ def level(value: int, peak: int, scale: str) -> str:
     return scale[max(1, min(steps, math.ceil(value * steps / peak)))]
 
 
-def render_map(grid: list[list[int]], day_names: list[str], hour_label: str = "ora",
-               scale: str = DEFAULT_SCALE) -> list[str]:
-    """Disegna la griglia 7×24 (lunedì per primo): una riga di ore, poi una riga per giorno col totale.
+def slots(grid: list[list[int]], slot: int = DEFAULT_SLOT) -> list[list[int]]:
+    """Raggruppa le 24 ore di ogni giorno in fasce di ``slot`` ore."""
+    return [[sum(row[h:h + slot]) for h in range(0, 24, slot)] for row in grid]
 
-    Ogni ora occupa due caratteri, così le etichette ogni tre ore stanno allineate sopra le celle."""
+
+def render_map(grid: list[list[int]], day_names: list[str], hour_label: str = "ore",
+               scale: str = DEFAULT_SCALE, slot: int = DEFAULT_SLOT) -> list[str]:
+    """Disegna la griglia 7×24 (lunedì per primo) a fasce di ``slot`` ore: l'intestazione con le
+    fasce, poi una riga per giorno col totale.
+
+    Ogni fascia è una colonna larga quanto la sua etichetta (``20-24``): tre caratteri della scala
+    pieni quanto i messaggi, oppure, se è vuota, il primo carattere della scala in mezzo."""
     if len(scale) < 2:
         scale = DEFAULT_SCALE
+    if slot not in SLOTS:
+        slot = DEFAULT_SLOT
+    cells = slots(grid, slot)
+    peak = max((v for row in cells for v in row), default=0)
     width = max([len(hour_label)] + [len(n) for n in day_names])
-    peak = max((v for row in grid for v in row), default=0)
-    header = hour_label.ljust(width) + " " + "".join(f"{h:02d}    " for h in range(0, 24, 3)).rstrip()
-    lines = [header]
-    for name, row in zip(day_names, grid):
-        cells = "".join(level(v, peak, scale) * 2 for v in row)
-        lines.append(f"{name.ljust(width)} {cells} {sum(row)}")
+
+    def cell(v: int) -> str:
+        return f"  {scale[0]}  " if v <= 0 else f" {level(v, peak, scale) * 3} "
+
+    lines = [hour_label.ljust(width) + " " + " ".join(f"{h:02d}-{h + slot:02d}" for h in range(0, 24, slot))]
+    for name, row in zip(day_names, cells):
+        lines.append(f"{name.ljust(width)} {' '.join(map(cell, row))}  {sum(row)}")
     return lines
+
+
+def best_slots(grid: list[list[int]], slot: int = DEFAULT_SLOT, n: int = 3) -> list[tuple[int, int, int]]:
+    """Le ``n`` fasce con più messaggi, come (giorno, ora d'inizio, messaggi): le più vive prima."""
+    if slot not in SLOTS:
+        slot = DEFAULT_SLOT
+    found = [(v, d, i * slot) for d, row in enumerate(slots(grid, slot)) for i, v in enumerate(row) if v > 0]
+    found.sort(key=lambda x: (-x[0], x[1], x[2]))
+    return [(d, h, v) for v, d, h in found[:n]]
 
 
 def _channel_of(path: Path, channel: str | None) -> str | None:

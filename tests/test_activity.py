@@ -36,12 +36,19 @@ class RenderTest(unittest.TestCase):
         grid = [[0] * 24 for _ in range(7)]
         grid[0][21] = 4
         grid[6][3] = 2
-        lines = activity.render_map(grid, "Lun Mar Mer Gio Ven Sab Dom".split(), "ora", " .:#")
+        lines = activity.render_map(grid, "Lun Mar Mer Gio Ven Sab Dom".split(), "ore", " .:#")
         self.assertEqual(len(lines), 8)
-        self.assertTrue(lines[0].startswith("ora 00    03    06"))
-        self.assertEqual(lines[1][4 + 21 * 2:4 + 22 * 2], "##")
-        self.assertEqual(lines[7][4 + 3 * 2:4 + 4 * 2], "::")
-        self.assertTrue(lines[1].endswith(" 4") and lines[2].endswith(" 0"))
+        self.assertTrue(lines[0].startswith("ore 00-04 04-08 08-12"))
+        self.assertEqual(lines[1][4 + 5 * 6:4 + 5 * 6 + 5], " ### ")   # Lun 20-24
+        self.assertEqual(lines[7][4:9], " ::: ")                       # Dom 00-04
+        self.assertEqual(activity.render_map(grid, ["Lun"])[1][4:9], "  ·  ")
+        self.assertTrue(lines[1].endswith("  4") and lines[2].endswith("  0"))
+
+    def test_best_slots(self):
+        grid = [[0] * 24 for _ in range(7)]
+        grid[0][21], grid[0][22], grid[6][3], grid[2][9] = 3, 1, 2, 2
+        self.assertEqual(activity.best_slots(grid), [(0, 20, 4), (2, 8, 2), (6, 0, 2)])
+        self.assertEqual(activity.best_slots(grid, 12, 1), [(0, 12, 4)])
 
 
 class MemoryActivityTest(unittest.TestCase):
@@ -84,23 +91,23 @@ class ActivityBotTest(unittest.IsolatedAsyncioTestCase):
         await self.line(":anna!a@host PRIVMSG Bot :in privato")        # privato
         out = await self.line(":anna!a@host PRIVMSG #linux :!mappaattivita")
         text = [o.split(" :", 1)[1] for o in out]
-        self.assertEqual(text[0], "Attività di #linux dal 02/11/2026: 3 messaggi.")
+        self.assertEqual(text[0], "Quando c'è gente in #linux (3 messaggi dal 02/11/2026).")
         self.assertEqual(len(text), 10)
         self.assertTrue(text[2].startswith("Lun ") and text[2].endswith(" 3"))
-        self.assertIn("Picco: Lun alle 21:00", text[-1])
+        self.assertEqual(text[-1], "Meglio venire: Lun 20-24.")
 
     async def test_bot_own_messages_not_counted(self):
         self.bot.say("#linux", "parlo io")
         await self.bot.drain()
         self.bot.take()
         out = await self.line(":anna!a@host PRIVMSG #linux :!mappaattivita 7")
-        self.assertIn("Attività di #linux negli ultimi 7 giorni: 1 messaggi.", out[0])
+        self.assertIn("(1 messaggi negli ultimi 7 giorni)", out[0])
 
     async def test_all_channels_and_chars(self):
         await self.line(":anna!a@host PRIVMSG #linux :ciao")
         out = await self.line(":anna!a@host PRIVMSG #linux :!mappa")
         self.assertIn("tutti i canali", out[0])
-        self.assertIn("xx", out[2])
+        self.assertIn("xxx", out[2])
 
     async def test_empty(self):
         out = await self.line(":anna!a@host PRIVMSG #linux :!mappavuota")
