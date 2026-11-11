@@ -913,6 +913,15 @@ commands:
     actions:
       - recent: "{arg1}"
 
+  mappaattivita:
+    aliases: [attivita, heatmap]
+    description: "Mappa ASCII dei giorni e delle ore in cui il canale è più vivo"
+    usage: "[giorni]"
+    examples: ["{prefix}mappaattivita", "{prefix}mappaattivita 30"]
+    cooldown: 60
+    actions:
+      - activity_map: "{arg1}"
+
   lascia:
     aliases: [tell, memo]
     description: "Lascia un messaggio a un utente, glielo riferirò appena lo vedo"

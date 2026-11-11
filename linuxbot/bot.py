@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
-from . import __version__
+from . import __version__, activity
 from .about import AboutMixin
 from .bans import BanMixin
 from .channeladmin import ChannelAdminMixin
@@ -25,7 +25,7 @@ from .scheduler import SchedulerMixin
 from .services import ServicesMixin
 from .search import Searcher, http_get
 from .stats import Stats
-from .config import Config, CommandConfig, ConfigError, ResponseConfig, load_config
+from .config import MEMORY_TEXTS, Config, CommandConfig, ConfigError, ResponseConfig, load_config
 from .memory import Memory, format_ts, time_ago
 from .irc import (
     Message, build_line, irc_lower, is_channel, mask_match, parse_isupport_prefix,
@@ -661,6 +661,8 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, Chann
             if chan is not None:
                 chan.users.setdefault(irc_lower(msg.nick), set())
             self._track(msg.nick, channel, "message", text if self.config.memory.store_messages else "", mask)
+            if self.seen_store is not None:
+                self.memory.activity_add(channel, self.wallclock())
         if self.seen_store and self.config.memory.memos.deliver_on_message:
             ctx["_memos_delivered"] = self._deliver_memos(msg.nick, channel, ctx)
 
@@ -1405,6 +1407,43 @@ class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, Chann
         if len(entries) > len(shown):
             names += " " + self._mem_text("recent_more", ctx, count=len(entries) - len(shown))
         self.say(target, self._mem_text("recent", ctx, period=period, count=len(entries), names=names))
+
+    def _action_activity_map(self, value: Any, ctx: dict) -> None:
+        opts = value if isinstance(value, dict) else {"days": value if value is not None else "{arg1}"}
+        days = int(self._number(self._r(opts.get("days", "{arg1}"), ctx)) or 0)
+        channel = self._r(opts.get("channel"), ctx) if opts.get("channel") else ctx.get("channel", "")
+        if opts.get("all_channels"):
+            channel = ""
+        scale = str(opts.get("chars") or activity.DEFAULT_SCALE)
+        if len(scale) < 2:
+            scale = activity.DEFAULT_SCALE
+        if self.seen_store is None:
+            log_mem.warning("activity_map: la memoria è disabilitata (memory.enabled)")
+            return
+        grid, first = self.memory.activity_map(channel or None, days)
+        where = channel or self._mem_text("activity_everywhere", ctx)
+        target = ctx["_target"]
+        total = sum(map(sum, grid))
+        if days > 0:
+            period = self._mem_text("activity_period_days", ctx, days=days)
+        elif first:
+            period = self._mem_text("activity_period_all", ctx,
+                                    since=datetime.strptime(first, "%Y-%m-%d").strftime("%d/%m/%Y"))
+        else:
+            period = ""
+        if not total:
+            self.say(target, self._mem_text("activity_none", ctx, where=where, period=period).replace("  ", " "))
+            return
+        names = self._mem_text("activity_days", ctx).split()
+        if len(names) != 7:
+            names = MEMORY_TEXTS["activity_days"].split()
+        self.say(target, self._mem_text("activity_title", ctx, where=where, period=period, count=total))
+        for line in activity.render_map(grid, names, self._mem_text("activity_hour", ctx), scale):
+            self.say(target, line)
+        peak = max(v for row in grid for v in row)
+        pday, phour = next((d, h) for d in range(7) for h in range(24) if grid[d][h] == peak)
+        self.say(target, self._mem_text("activity_legend", ctx, scale=scale, low=scale[0], high=scale[-1],
+                                        peak=peak, peak_day=names[pday], peak_hour=f"{phour:02d}:00"))
 
     _NICK_RE = re.compile(r"^[A-Za-z\[\]\\`_^{|}][A-Za-z0-9\[\]\\`_^{|}-]*$")
 

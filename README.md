@@ -39,6 +39,8 @@ richiede Python 3.10+.
 - **Ban**: ban a tempo, unban per nick anche dopo che l'utente è uscito, `!banlist`, `!baninfo`,
   ripristino dei ban tolti a mano, owner e admin immuni.
 - **Attività programmate** a orari fissi o a intervalli, recuperate se il PC era spento.
+- **Mappa dell'attività** (`!mappaattivita`): heatmap in ASCII art dei giorni e degli orari più
+  vivaci del canale, riempibile anche con lo storico dei log di weechat (`--import-activity`).
 - **Memoria permanente** in SQLite: karma, ban, messaggi e stato sopravvivono ai riavvii (anche a
   uno spegnimento improvviso), con backup automatico.
 - **Log** per debug e ottimizzazione: livelli per area, rotazione, JSON, password sempre

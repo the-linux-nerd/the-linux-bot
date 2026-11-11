@@ -1,4 +1,4 @@
-"""Memoria persistente del bot (SQLite): chi è passato e messaggi lasciati per gli utenti."""
+"""Memoria persistente del bot (SQLite): chi è passato, messaggi lasciati per gli utenti, attività dei canali."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +88,14 @@ CREATE TABLE IF NOT EXISTS managed_channels (
     ts         REAL NOT NULL,
     expires    REAL,                       -- canali temporanei: quando chiudere (NULL = permanente)
     warned     INTEGER NOT NULL DEFAULT 0  -- avviso di chiusura già dato
+);
+-- messaggi di canale per giorno e ora locale: la mappa dell'attività (nessun nick, nessun testo)
+CREATE TABLE IF NOT EXISTS activity (
+    channel TEXT NOT NULL,
+    day TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    messages INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (channel, day, hour)
 );
 CREATE TABLE IF NOT EXISTS state (
     key     TEXT PRIMARY KEY,       -- es. "schedule:karma-mezzanotte", "youtube:@the-linux-nerd"
@@ -287,6 +295,7 @@ class Memory:
             "ban attivi": q("SELECT COUNT(*) FROM bans WHERE removed_ts IS NULL"),
             "utenti con karma": q("SELECT COUNT(*) FROM karma WHERE score != 0"),
             "canali creati da IRC": q("SELECT COUNT(*) FROM managed_channels"),
+            "messaggi nella mappa attività": q("SELECT COALESCE(SUM(messages), 0) FROM activity"),
         }
 
     @_timed
@@ -359,6 +368,53 @@ class Memory:
         self.db.execute("DELETE FROM bans WHERE removed_ts IS NOT NULL AND removed_ts < ?", (cutoff,))
         self.db.execute("DELETE FROM karma_log WHERE ts < ?", (cutoff,))  # i punteggi restano
         self.db.commit()
+
+    # ------------------------------------------------------------------ attività
+
+    @_timed
+    def activity_add(self, channel: str, ts: float | None = None) -> None:
+        """Conta un messaggio in ``channel`` nell'ora (locale) di ``ts``."""
+        when = datetime.fromtimestamp(self.clock() if ts is None else ts)
+        self.db.execute(
+            "INSERT INTO activity (channel, day, hour, messages) VALUES (?, ?, ?, 1) "
+            "ON CONFLICT (channel, day, hour) DO UPDATE SET messages = messages + 1",
+            (irc_lower(channel), when.strftime("%Y-%m-%d"), when.hour))
+        self.db.commit()
+
+    @_timed
+    def activity_replace(self, channel: str, counts: dict[tuple[str, int], int]) -> int:
+        """Sostituisce i conteggi dei giorni presenti in ``counts`` (chiavi ``(AAAA-MM-GG, ora)``).
+
+        Serve all'import dei log: rifarlo non raddoppia niente, e per quei giorni vince il log,
+        che è più completo del conteggio dal vivo. Restituisce i messaggi scritti."""
+        key = irc_lower(channel)
+        days = sorted({day for day, _ in counts})
+        self.db.executemany("DELETE FROM activity WHERE channel = ? AND day = ?", [(key, d) for d in days])
+        self.db.executemany("INSERT INTO activity (channel, day, hour, messages) VALUES (?, ?, ?, ?)",
+                            [(key, day, hour, n) for (day, hour), n in counts.items() if n > 0])
+        self.db.commit()
+        return sum(counts.values())
+
+    @_timed
+    def activity_map(self, channel: str | None = None, days: int = 0) -> tuple[list[list[int]], str | None]:
+        """Messaggi per giorno della settimana (lunedì = 0) e ora, e il primo giorno contato.
+
+        ``days`` limita agli ultimi N giorni (oggi compreso); 0 vuol dire tutto lo storico."""
+        sql = "SELECT day, hour, messages FROM activity WHERE 1 = 1"
+        params: list = []
+        if channel:
+            sql += " AND channel = ?"
+            params.append(irc_lower(channel))
+        if days and days > 0:
+            today = datetime.fromtimestamp(self.clock()).date()
+            sql += " AND day >= ?"
+            params.append(date.fromordinal(today.toordinal() - int(days) + 1).isoformat())
+        grid = [[0] * 24 for _ in range(7)]
+        first = None
+        for day, hour, n in self.db.execute(sql, params):
+            grid[date.fromisoformat(day).weekday()][int(hour) % 24] += int(n)
+            first = day if first is None or day < first else first
+        return grid, first
 
     # ------------------------------------------------------------------ memo
 

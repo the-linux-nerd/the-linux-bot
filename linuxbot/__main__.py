@@ -14,7 +14,47 @@ from . import __version__
 from .bot import Bot
 from .config import ConfigError, load_config
 from .logsetup import configure_logging
-from .memory import DatabaseLocked
+from .memory import DatabaseLocked, Memory
+
+
+def _import_activity(config, paths: list[str], channel: str | None) -> int:
+    """Riempie la mappa dell'attività con lo storico dei log (weechat o chatlog del bot)."""
+    from collections import Counter
+
+    from .activity import count_log, log_files
+    from .irc import irc_lower
+
+    if not config.memory.enabled:
+        print("Errore: la mappa dell'attività vive nel database della memoria (memory.enabled: true).",
+              file=sys.stderr)
+        return 2
+    files = log_files(paths)
+    if not files:
+        print("Nessun log da importare.", file=sys.stderr)
+        return 2
+    per_channel: dict[str, Counter] = {}
+    for path in files:
+        try:
+            chan, counts = count_log(path, channel, {irc_lower(config.identity.nick)})
+        except OSError as exc:
+            print(f"Impossibile leggere {path}: {exc}", file=sys.stderr)
+            return 2
+        if not chan:
+            print(f"{path}: non capisco il canale dal nome del file, indicalo con --channel", file=sys.stderr)
+            return 2
+        per_channel.setdefault(irc_lower(chan), Counter()).update(counts)
+    try:
+        mem = Memory(config.database_path, lock=True)
+    except DatabaseLocked as exc:
+        print(f"Errore: {exc}. Ferma il bot prima di importare.", file=sys.stderr)
+        return 3
+    try:
+        for chan, counts in sorted(per_channel.items()):
+            written = mem.activity_replace(chan, counts)
+            print(f"{chan}: {written} messaggi in {len({d for d, _ in counts})} giorni")
+    finally:
+        mem.close()
+    return 0
 
 
 async def _main(bot: Bot) -> None:
@@ -53,6 +93,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="cartella per database, log e backup se indicati con percorsi relativi "
                              "(default: la cartella del file di configurazione; anche $LINUXBOT_DATA_DIR)")
     parser.add_argument("--check", action="store_true", help="valida la configurazione ed esce")
+    parser.add_argument("--import-activity", nargs="+", metavar="LOG",
+                        help="riempie la mappa dell'attività (!mappaattivita) coi log indicati ed esce: "
+                             "log di weechat o file/cartelle della chatlog del bot; a bot fermo")
+    parser.add_argument("--channel", help="con --import-activity: il canale dei log, se non si ricava dal nome")
     parser.add_argument("-v", "--verbose", action="store_true", help="log di debug (mostra il traffico IRC)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args(argv)
@@ -69,6 +113,9 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as exc:
             print(f"Impossibile creare la cartella dati {config.data_dir}: {exc}", file=sys.stderr)
             return 2
+
+    if args.import_activity:
+        return _import_activity(config, args.import_activity, args.channel)
 
     if args.check:
         def n(count: int, one: str, many: str) -> str:
