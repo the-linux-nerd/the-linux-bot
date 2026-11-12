@@ -51,6 +51,7 @@ ACTIONS = {
     "stats": "statistiche di funzionamento del bot",
     "explain": "il bot spiega sé stesso, un comando o un argomento",
     "search": "cerca risposte su Stack Overflow, unix.SE, ArchWiki...",
+    "news": "racconta la notizia più importante dei feed (sezione news, modello OpenAI)",
     "karma_change": "dà o toglie punti karma a un utente",
     "karma_show": "mostra il karma di un utente",
     "karma_top": "classifica del karma",
@@ -448,6 +449,47 @@ class SearchProvider:
     channels: list[str] = field(default_factory=list)  # youtube: handle (@nome) o ID (UC...)
     api_key: str = ""         # youtube: chiave YouTube Data API v3 (senza: solo gli ultimi 15 video, via feed)
     order: str = "relevance"  # youtube: relevance | date
+
+
+DEFAULT_NEWS_FEEDS = [
+    "https://lwn.net/headlines/rss",
+    "https://www.phoronix.com/rss.php",
+    "https://9to5linux.com/feed",
+    "https://linuxiac.com/feed/",
+    "https://www.omgubuntu.co.uk/feed",
+    "https://itsfoss.com/rss/",
+    "https://www.linuxtoday.com/feed/",
+    "https://feeds.feedburner.com/TheHackersNews",
+    "https://www.bleepingcomputer.com/feed/",
+    "https://krebsonsecurity.com/feed/",
+    "https://www.schneier.com/feed/atom/",
+    "https://www.securityweek.com/feed/",
+    "https://www.darkreading.com/rss.xml",
+    "https://hackaday.com/blog/feed/",
+]
+
+
+@dataclass
+class NewsConfig:
+    enabled: bool = False
+    feeds: list[str] = field(default_factory=lambda: list(DEFAULT_NEWS_FEEDS))
+    model: str = "gpt-5-mini"
+    api_key_file: str = ""            # file con la chiave OpenAI; vuoto = variabile OPENAI_API_KEY
+    max_age_hours: float = 12.0       # solo le voci uscite nelle ultime N ore
+    max_candidates: int = 80          # voci passate al modello, le più recenti
+    timeout: float = 15.0             # per feed (la richiesta al modello ha il quadruplo)
+    text: str = "📰 {title}\n{summary}\n🔗 {source}: {link}"
+
+
+def _parse_news(data: dict) -> NewsConfig:
+    sd = _section(data, "news", "")
+    _check_keys(sd, set(NewsConfig.__dataclass_fields__), "news")
+    cfg = NewsConfig(**sd)
+    if not isinstance(cfg.feeds, list) or not all(isinstance(u, str) and u.startswith("http") for u in cfg.feeds):
+        raise ConfigError("news.feeds: deve essere una lista di URL")
+    cfg.max_age_hours, cfg.timeout = float(cfg.max_age_hours), float(cfg.timeout)
+    cfg.max_candidates = int(cfg.max_candidates)
+    return cfg
 
 
 @dataclass
@@ -889,6 +931,7 @@ class Config:
     self_op: SelfOpConfig = field(default_factory=SelfOpConfig)
     about: AboutConfig = field(default_factory=AboutConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    news: NewsConfig = field(default_factory=NewsConfig)
     karma: KarmaConfig = field(default_factory=KarmaConfig)
     schedules: list[ScheduleConfig] = field(default_factory=list)
     channel_management: ChannelManagementConfig = field(default_factory=ChannelManagementConfig)
@@ -1104,7 +1147,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         raise ConfigError("il file di configurazione deve contenere una mappa YAML")
     data = _expand_env(data)
     _check_keys(data, {"server", "identity", "auth", "channels", "admins", "behavior", "variables",
-                       "greetings", "responses", "commands", "events", "logging", "memory", "bans", "self_op", "about", "search", "karma", "schedules",
+                       "greetings", "responses", "commands", "events", "logging", "memory", "bans", "self_op", "about", "search", "news", "karma", "schedules",
                        "channel_management", "channel_templates"}, "<radice>")
 
     # server
@@ -1351,7 +1394,7 @@ def parse_config(data: Any, path: Path | None = None) -> Config:
         server=server, identity=identity, auth=auth, channels=channels,
         admins=[str(a) for a in _as_list(data.get("admins"))], behavior=behavior,
         variables=variables, greetings=greetings, responses=responses, commands=commands,
-        events=events, logging=_parse_logging(data), memory=_parse_memory(data), bans=_parse_bans(data), self_op=_parse_self_op(data), about=_parse_about(data), search=_parse_search(data), karma=_parse_karma(data), schedules=_parse_schedules(data),
+        events=events, logging=_parse_logging(data), memory=_parse_memory(data), bans=_parse_bans(data), self_op=_parse_self_op(data), about=_parse_about(data), search=_parse_search(data), news=_parse_news(data), karma=_parse_karma(data), schedules=_parse_schedules(data),
         channel_management=management, channel_templates=templates,
         path=path,
     )

@@ -24,7 +24,7 @@ Convenzioni:
 [admins](#admins) · [behavior](#behavior) · [variables](#variables) ·
 [greetings](#greetings) · [responses](#responses) · [commands](#commands) ·
 [events](#events) · [memory](#memory) · [bans](#bans) · [self_op](#self_op) ·
-[about](#about) · [search](#search) · [karma](#karma) · [schedules](#schedules) ·
+[about](#about) · [search](#search) · [news](#news) · [karma](#karma) · [schedules](#schedules) ·
 [logging](#logging) · [azioni](#azioni) · [variabili](#variabili-nei-testi) ·
 [testi predefiniti](#testi-predefiniti)
 
@@ -314,6 +314,22 @@ stato delle attività).
 | `search.providers[].order` | testo | `relevance` | youtube: `relevance` o `date` |
 | `search.texts` | mappa | vedi [testi](#testi-predefiniti) | testi |
 
+## news
+
+Notizie dai feed RSS/Atom raccontate da un modello OpenAI: si usano con l'azione `news` in
+un'attività programmata (vedi [funzioni](funzioni.md#notizie-dai-feed)).
+
+| Chiave | Tipo | Predefinito | Significato |
+|---|---|---|---|
+| `news.enabled` | sì/no | `false` | attiva l'azione `news` |
+| `news.feeds` | lista | 14 feed Linux e sicurezza (LWN, Phoronix, The Hacker News...) | URL dei feed RSS o Atom |
+| `news.model` | testo | `gpt-5-mini` | modello OpenAI che sceglie e racconta |
+| `news.api_key_file` | percorso | nessuno | file con la chiave OpenAI; vuoto = variabile `OPENAI_API_KEY` |
+| `news.max_age_hours` | ore | `12` | solo le voci uscite nelle ultime N ore |
+| `news.max_candidates` | numero | `80` | voci passate al modello, le più recenti |
+| `news.timeout` | secondi | `15` | per feed; la richiesta al modello ha il quadruplo |
+| `news.text` | testo | `📰 {title}` / `{summary}` / `🔗 {source}: {link}` | messaggio, su tre righe; variabili `{title}`, `{summary}`, `{source}`, `{link}` |
+
 ## karma
 
 | Chiave | Tipo | Predefinito | Significato |
@@ -422,6 +438,7 @@ Senza indicazioni il canale è quello del messaggio e il nick quello di chi l'ha
 | `stats` | `stats` | `{section, method}` |
 | `explain` | `explain: "{args}"` | `{topic, method}`; vuoto = presentazione |
 | `search` | `search: "{args}"` | `{query, providers}` |
+| `news` | `news` | `{to, text}`: la notizia più importante dei feed, mai la stessa nella giornata |
 | `karma_change` | `karma_change: "{arg1}"` | `{nick, delta: 1\|-1, quiet}` |
 | `karma_show` | `karma_show: "{target}"` | `{nick}` |
 | `karma_top` | `karma_top` | `{size, worst, skip_empty, text}` |

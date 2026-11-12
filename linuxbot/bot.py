@@ -21,6 +21,7 @@ from .channeladmin import ChannelAdminMixin
 from .channelset import ChannelSettingsMixin
 from .chatlog import ChatLog
 from .karma import KarmaMixin
+from .news import NewsMixin
 from .scheduler import SchedulerMixin
 from .services import ServicesMixin
 from .search import Searcher, http_get
@@ -56,7 +57,7 @@ class Channel:
     modes_known: bool = False
 
 
-class Bot(AboutMixin, BanMixin, KarmaMixin, SchedulerMixin, ServicesMixin, ChannelSettingsMixin,
+class Bot(AboutMixin, BanMixin, KarmaMixin, NewsMixin, SchedulerMixin, ServicesMixin, ChannelSettingsMixin,
           ChannelAdminMixin):
     def __init__(self, config: Config, clock: Callable[[], float] = time.monotonic,
                  wallclock: Callable[[], float] = time.time):

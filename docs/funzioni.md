@@ -276,6 +276,39 @@ search:
   nei video, più la frase "c'è un video su ...?". Il bot deve poter raggiungere
   `www.googleapis.com` (con la chiave) o `www.youtube.com` (senza).
 
+## Notizie dai feed
+
+L'azione `news` legge i feed della sezione `news` ( RSS o Atom ), prende le voci delle ultime
+`max_age_hours` ore e le passa a un modello OpenAI, che sceglie la più importante per chi usa
+Linux e la racconta in italiano in due-quattro frasi. Il bot la scrive nel canale con la fonte e
+il link.
+
+- Una notizia raccontata non torna: i link si ricordano per una settimana, e al modello si
+  passano i titoli già raccontati oggi, così non sceglie lo stesso fatto da un'altra fonte.
+- Lo stato sta nel database ( chiave `news` ), quindi regge i riavvii.
+- Più canali nella stessa attività ricevono la stessa notizia, con una sola richiesta al modello.
+- Un feed che non risponde si salta; se il modello non trova niente che meriti, il bot tace.
+- Costo: circa 2.000 token in ingresso e 500 in uscita a giro; con `gpt-5-mini` ogni ora dalle
+  9 alle 22 è meno di un euro al mese.
+
+```yaml
+news:
+  enabled: true
+  api_key_file: openai.key     # relativo alla cartella dati, oppure OPENAI_API_KEY
+
+schedules:
+  - name: notizie
+    at: ["09:26", "10:26", "11:26", "12:26", "13:26", "14:26", "15:26",
+         "16:26", "17:26", "18:26", "19:26", "20:26", "21:26"]
+    catch_up: 10m
+    channels: ["#the-linux-nerd"]
+    actions:
+      - news
+```
+
+Per provarla subito: `!esegui notizie` ( l'azione `schedule_run` ), che però conta come una
+notizia della giornata.
+
 ## Memoria: "seen", chi è passato, messaggi lasciati
 
 Con `memory.enabled: true` il bot salva in un database SQLite (`memory.database`, relativo alla

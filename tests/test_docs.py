@@ -39,6 +39,7 @@ def expected_options() -> set[str]:
         "about": fields(c.AboutConfig, {"topics"}),
         "search": fields(c.SearchConfig),
         "search.providers[]": fields(c.SearchProvider, {"host"}),
+        "news": fields(c.NewsConfig),
         "karma": fields(c.KarmaConfig),
         "schedules[]": fields(c.ScheduleConfig),
         "logging": fields(c.LoggingConfig, {"file", "alerts", "chatlog", "levels"}),
