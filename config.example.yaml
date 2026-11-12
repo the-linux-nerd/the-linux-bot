@@ -950,6 +950,26 @@ commands:
       - kick:
           nick: "{arg1}"
           reason: "{rest}"
+  invita:
+    description: "Invita un utente nel canale e gli spiega come metterlo in autojoin"
+    usage: "<nick>"
+    permission: op
+    min_args: 1
+    private: false
+    actions:
+      - invite:
+          channel: "#linux"
+          nick: "{arg1}"
+      - say:
+          to: "{arg1}"
+          text: |-
+            Ciao {arg1}, {nick} ti invita in #linux: /join #linux
+            Per entrarci da solo a ogni connessione, mettilo fra gli autojoin del tuo client:
+            weechat: /autojoin add #linux  (dal buffer del server, poi /save)
+            irssi: /channel add -auto #linux <rete>  (poi /save)
+            HexChat: tasto destro sulla scheda del canale, spunta "Entra automaticamente"
+            Ci vediamo dentro!
+      - notice: "Invito mandato a {arg1}."
 
   ban:
     description: "Banna ed espelle un utente (nick o maschera)"
